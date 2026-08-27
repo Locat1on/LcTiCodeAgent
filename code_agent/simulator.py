@@ -70,7 +70,10 @@ class SimulatedAgent:
             step_id=step_id,
         )
 
-        conclusion = "第一阶段当前使用模拟工具流；真实模型和本地工具将在下一阶段接入。"
+        conclusion = (
+            "当前为离线模拟工具流；使用 --live 可切换到 OpenRouter "
+            "模型和本地只读工具。"
+        )
         yield AgentEvent.create(
             EventType.ASSISTANT_DELTA,
             session_id,
