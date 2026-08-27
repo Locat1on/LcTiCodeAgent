@@ -11,6 +11,8 @@ from .events import AgentEvent, EventType
 class SimulatedAgent:
     """Produce realistic events without calling a model or changing files."""
 
+    mode = "simulation"
+    model = "simulator"
     context_limit = 32_000
 
     def __init__(self) -> None:
@@ -133,4 +135,3 @@ class SimulatedAgent:
             turn_id=turn_id,
             step_id=step_id,
         )
-

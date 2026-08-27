@@ -17,15 +17,26 @@ class TerminalUI:
         self.console = console or Console()
         self._assistant_stream_open = False
 
-    def show_header(self, workspace: Path, session_id: str) -> None:
+    def show_header(
+        self,
+        workspace: Path,
+        session_id: str,
+        mode: str = "simulation",
+        model: str = "simulator",
+    ) -> None:
         title = Text("LcTiCodeAgent", style="bold cyan")
         body = Text()
         body.append("Workspace  ", style="dim")
         body.append(str(workspace))
         body.append("\nSession    ", style="dim")
         body.append(session_id)
+        body.append("\nModel      ", style="dim")
+        body.append(model)
         body.append("\nStage      ", style="dim")
-        body.append("UI and event protocol simulation", style="yellow")
+        if mode == "simulation":
+            body.append("UI and event protocol simulation", style="yellow")
+        else:
+            body.append("OpenRouter live agent", style="green")
         self.console.print(Panel(body, title=title, border_style="cyan"))
 
     def show_help(self) -> None:

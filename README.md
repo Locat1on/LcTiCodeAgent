@@ -2,7 +2,7 @@
 
 一个从零实现的可对话终端编程智能体。本项目不依赖任何 Agent 框架或 SDK，模型交互、会话历史、上下文管理、工具执行、循环终止与错误处理均由项目自行实现。
 
-当前完成第一阶段：以追加式事件日志为核心，建立可对话终端 UI 和可替换的模拟 Agent 事件流。后续阶段将在同一事件协议上接入模型原生 tool calling、本地工具、任务感知上下文压缩与安全执行环境。
+当前已建立追加式事件日志、可对话终端 UI，并接入 OpenRouter 流式 Function Calling 与本地只读工具。后续将在同一事件协议上继续实现文件修改、命令执行、任务感知上下文压缩与安全执行环境。
 
 ## 当前功能
 
@@ -13,6 +13,8 @@
 - 将全部事件持久化为 JSONL
 - `/help`、`/status`、`/context`、`/clear`、`/exit` 命令
 - `--demo` 非交互演示模式，便于测试和录制
+- OpenRouter 上 `google/gemini-3.7-flash` 的流式 Function Calling
+- 本地 `list_files` 与 `read_file` 只读工具
 
 ## 运行
 
@@ -27,6 +29,15 @@ py -V:3.12 -m venv .venv
 ```powershell
 .\.venv\Scripts\python.exe -m code_agent --demo
 ```
+
+使用 OpenRouter 运行真实单任务：
+
+```powershell
+$env:OPENROUTER_API_KEY = "你的密钥"
+.\.venv\Scripts\python.exe -m code_agent --live --prompt "概括这个项目的目录结构"
+```
+
+默认模型为固定版本 `google/gemini-3.7-flash`。模型只能请求工具；文件读取和执行均由本项目在本地完成。项目不使用 OpenRouter Agent SDK、Server Tools 或任何托管代码执行能力。
 
 运行测试：
 

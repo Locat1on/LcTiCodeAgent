@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
 from .events import AgentEvent, EventType
@@ -12,17 +14,34 @@ from .simulator import SimulatedAgent
 from .ui import TerminalUI
 
 
+class AgentBackend(Protocol):
+    mode: str
+    model: str
+    context_limit: int
+    used_tokens: int
+
+    def respond(
+        self,
+        user_text: str,
+        session_id: str,
+        turn_id: str,
+    ) -> Iterator[AgentEvent]: ...
+
+    def clear_context(self) -> None: ...
+
+
 class Application:
     def __init__(
         self,
         workspace: Path,
         session_root: Path,
         ui: TerminalUI | None = None,
+        agent: AgentBackend | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.log = SessionLog(session_root)
         self.ui = ui or TerminalUI()
-        self.agent = SimulatedAgent()
+        self.agent = agent or SimulatedAgent()
 
     def start(self) -> None:
         event = AgentEvent.create(
@@ -30,12 +49,18 @@ class Application:
             self.log.session_id,
             {
                 "workspace": str(self.workspace),
-                "mode": "simulation",
+                "mode": self.agent.mode,
+                "model": self.agent.model,
                 "context_limit": self.agent.context_limit,
             },
         )
         self._publish(event, render=False)
-        self.ui.show_header(self.workspace, self.log.session_id)
+        self.ui.show_header(
+            self.workspace,
+            self.log.session_id,
+            self.agent.mode,
+            self.agent.model,
+        )
 
     def run_turn(self, user_text: str) -> None:
         turn_id = str(uuid4())
@@ -78,7 +103,7 @@ class Application:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lcticode",
-        description="Conversational coding agent terminal UI (stage-one simulation).",
+        description="Conversational coding agent terminal UI.",
     )
     parser.add_argument(
         "--workspace",
@@ -92,21 +117,52 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("sessions"),
         help="directory used for append-only JSONL session logs",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--demo",
         action="store_true",
         help="run one deterministic demonstration turn and exit",
+    )
+    mode.add_argument(
+        "--live",
+        action="store_true",
+        help="use OpenRouter instead of the deterministic simulator",
+    )
+    parser.add_argument(
+        "--prompt",
+        help="run one task and exit; combine with --live for a real model call",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    app = Application(args.workspace, args.session_root)
+    agent: AgentBackend | None = None
+    if args.live:
+        from .live_agent import LiveAgent
+        from .openrouter import (
+            OpenRouterConfig,
+            OpenRouterConfigurationError,
+            OpenRouterProvider,
+        )
+        from .tools import ToolRegistry
+
+        try:
+            config = OpenRouterConfig.from_env()
+        except OpenRouterConfigurationError as error:
+            TerminalUI().console.print(f"[red]Configuration error: {error}[/red]")
+            return 2
+        provider = OpenRouterProvider(config)
+        agent = LiveAgent(provider, ToolRegistry(args.workspace))
+
+    app = Application(args.workspace, args.session_root, agent=agent)
     app.start()
 
+    one_shot_prompt = args.prompt
     if args.demo:
-        app.run_turn("检查注册功能并说明下一步")
+        one_shot_prompt = "检查注册功能并说明下一步"
+    if one_shot_prompt:
+        app.run_turn(one_shot_prompt)
         app.show_status()
         return 0
 
