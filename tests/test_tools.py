@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from code_agent.tools import ToolRegistry
 from tests.helpers import test_directory
@@ -67,6 +69,166 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertFalse(example.is_error)
         self.assertTrue(local.is_error)
+
+    def test_replace_requires_one_exact_match(self) -> None:
+        with test_directory() as workspace:
+            source = workspace / "example.py"
+            source.write_text("value = 1\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute(
+                "replace_in_file",
+                {
+                    "path": "example.py",
+                    "old_text": "value = 1",
+                    "new_text": "value = 2",
+                },
+            )
+            updated = source.read_text(encoding="utf-8")
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(updated, "value = 2\n")
+        self.assertNotEqual(
+            json.loads(result.content)["old_sha256"],
+            json.loads(result.content)["new_sha256"],
+        )
+
+    def test_replace_rejects_ambiguous_match_without_changing_file(self) -> None:
+        with test_directory() as workspace:
+            source = workspace / "example.txt"
+            source.write_text("same\nsame\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute(
+                "replace_in_file",
+                {"path": "example.txt", "old_text": "same", "new_text": "new"},
+            )
+            preserved = source.read_text(encoding="utf-8")
+
+        self.assertTrue(result.is_error)
+        self.assertIn("found 2", result.content)
+        self.assertEqual(preserved, "same\nsame\n")
+
+    def test_write_file_creates_new_file_but_never_overwrites(self) -> None:
+        with test_directory() as workspace:
+            registry = ToolRegistry(workspace)
+
+            created = registry.execute(
+                "write_file",
+                {"path": "new/module.py", "content": "answer = 42\n"},
+            )
+            overwritten = registry.execute(
+                "write_file",
+                {"path": "new/module.py", "content": "answer = 0\n"},
+            )
+            content = (workspace / "new" / "module.py").read_text(encoding="utf-8")
+
+        self.assertFalse(created.is_error)
+        self.assertTrue(overwritten.is_error)
+        self.assertEqual(content, "answer = 42\n")
+
+    def test_write_rejects_sensitive_and_outside_paths(self) -> None:
+        with test_directory() as workspace:
+            registry = ToolRegistry(workspace)
+
+            sensitive = registry.execute(
+                "write_file",
+                {"path": ".env", "content": "TOKEN=secret"},
+            )
+            escaped = registry.execute(
+                "write_file",
+                {"path": "../outside.py", "content": "unsafe = True"},
+            )
+
+        self.assertTrue(sensitive.is_error)
+        self.assertTrue(escaped.is_error)
+
+    def test_run_command_executes_tests_without_forwarding_api_key(self) -> None:
+        with test_directory() as workspace:
+            tests = workspace / "tests"
+            tests.mkdir()
+            (tests / "test_environment.py").write_text(
+                "import os\n"
+                "import unittest\n\n"
+                "class EnvironmentTests(unittest.TestCase):\n"
+                "    def test_secret_is_absent(self):\n"
+                "        self.assertNotIn('OPENROUTER_API_KEY', os.environ)\n",
+                encoding="utf-8",
+            )
+            registry = ToolRegistry(workspace)
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "top-secret"}):
+                result = registry.execute(
+                    "run_command",
+                    {
+                        "argv": [
+                            "python",
+                            "-m",
+                            "unittest",
+                            "discover",
+                            "-s",
+                            "tests",
+                            "-v",
+                        ]
+                    },
+                )
+            outcome = json.loads(result.content)
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(outcome["exit_code"], 0)
+        self.assertFalse(outcome["timed_out"])
+
+    def test_run_command_reports_failure_and_denies_arbitrary_python(self) -> None:
+        with test_directory() as workspace:
+            tests = workspace / "tests"
+            tests.mkdir()
+            (tests / "test_failure.py").write_text(
+                "import unittest\n\n"
+                "class FailureTests(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.fail('expected failure')\n",
+                encoding="utf-8",
+            )
+            registry = ToolRegistry(workspace)
+
+            failed = registry.execute(
+                "run_command",
+                {"argv": ["python", "-m", "unittest", "discover", "-s", "tests"]},
+            )
+            denied = registry.execute(
+                "run_command",
+                {"argv": ["python", "-c", "print('not allowed')"]},
+            )
+
+        self.assertTrue(failed.is_error)
+        self.assertNotEqual(json.loads(failed.content)["exit_code"], 0)
+        self.assertTrue(denied.is_error)
+        self.assertIn("limited", denied.content)
+
+    def test_run_command_times_out(self) -> None:
+        with test_directory() as workspace:
+            tests = workspace / "tests"
+            tests.mkdir()
+            (tests / "test_slow.py").write_text(
+                "import time\n"
+                "import unittest\n\n"
+                "class SlowTests(unittest.TestCase):\n"
+                "    def test_slow(self):\n"
+                "        time.sleep(3)\n",
+                encoding="utf-8",
+            )
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute(
+                "run_command",
+                {
+                    "argv": ["python", "-m", "unittest", "discover", "-s", "tests"],
+                    "timeout_seconds": 1,
+                },
+            )
+            outcome = json.loads(result.content)
+
+        self.assertTrue(result.is_error)
+        self.assertTrue(outcome["timed_out"])
 
 
 if __name__ == "__main__":
