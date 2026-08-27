@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
+
+from .command import CommandRunner
 
 
 IGNORED_DIRECTORIES = {
@@ -60,8 +64,14 @@ class ToolDefinition:
 
 
 class ToolRegistry:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        command_runner: CommandRunner | None = None,
+    ) -> None:
         self.workspace = workspace.resolve()
+        self.command_runner = command_runner or CommandRunner()
         self._definitions = {
             definition.name: definition
             for definition in (
@@ -111,6 +121,70 @@ class ToolRegistry:
                         "additionalProperties": False,
                     },
                     handler=self._read_file,
+                ),
+                ToolDefinition(
+                    name="replace_in_file",
+                    description=(
+                        "Replace exactly one occurrence of old_text in an existing "
+                        "UTF-8 file inside the workspace. Read the file first."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                        },
+                        "required": ["path", "old_text", "new_text"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._replace_in_file,
+                ),
+                ToolDefinition(
+                    name="write_file",
+                    description=(
+                        "Create a new UTF-8 text file inside the workspace. "
+                        "This tool never overwrites an existing file."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._write_file,
+                ),
+                ToolDefinition(
+                    name="run_command",
+                    description=(
+                        "Run a verification command locally without a shell. Pass argv "
+                        "as an array. Only test, lint, typecheck, build, and compile "
+                        "commands are allowed; network and install commands are denied."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "argv": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 32,
+                            },
+                            "cwd": {"type": "string", "default": "."},
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 120,
+                                "default": 60,
+                            },
+                        },
+                        "required": ["argv"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._run_command,
                 ),
             )
         }
@@ -198,7 +272,7 @@ class ToolRegistry:
         if end_line - start_line + 1 > 200:
             raise ValueError("a single read may contain at most 200 lines")
 
-        text = path.read_text(encoding="utf-8")
+        text = self._read_text(path)
         if "\x00" in text:
             raise ValueError("binary files are not supported")
         lines = text.splitlines()
@@ -210,6 +284,106 @@ class ToolRegistry:
         if len(numbered) > 32_000:
             numbered = numbered[:32_000] + "\n[output truncated at 32000 characters]"
         return ToolResult(numbered)
+
+    def _replace_in_file(self, arguments: dict[str, Any]) -> ToolResult:
+        path = self._resolve(arguments.get("path"))
+        if self._is_sensitive(path):
+            raise ValueError("writing sensitive credential files is denied")
+        if not path.is_file():
+            raise ValueError("path is not an existing file")
+        if path.stat().st_size > 1_000_000:
+            raise ValueError("file is larger than the 1 MB edit limit")
+
+        old_text = arguments.get("old_text")
+        new_text = arguments.get("new_text")
+        if not isinstance(old_text, str) or not old_text:
+            raise ValueError("old_text must be a non-empty string")
+        if not isinstance(new_text, str):
+            raise ValueError("new_text must be a string")
+        if len(new_text) > 200_000:
+            raise ValueError("new_text exceeds the 200000 character limit")
+
+        original = self._read_text(path)
+        occurrences = original.count(old_text)
+        if occurrences != 1:
+            raise ValueError(
+                f"old_text must match exactly once; found {occurrences} occurrences"
+            )
+        updated = original.replace(old_text, new_text, 1)
+        if updated == original:
+            raise ValueError("replacement would not change the file")
+        self._write_text_atomic(path, updated)
+        return ToolResult(
+            json.dumps(
+                {
+                    "path": path.relative_to(self.workspace).as_posix(),
+                    "old_sha256": self._sha256(original),
+                    "new_sha256": self._sha256(updated),
+                    "changed": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def _write_file(self, arguments: dict[str, Any]) -> ToolResult:
+        path = self._resolve(arguments.get("path"))
+        if self._is_sensitive(path):
+            raise ValueError("writing sensitive credential files is denied")
+        if path.exists():
+            raise ValueError("write_file refuses to overwrite an existing path")
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        if len(content) > 200_000:
+            raise ValueError("content exceeds the 200000 character limit")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_text_atomic(path, content)
+        return ToolResult(
+            json.dumps(
+                {
+                    "path": path.relative_to(self.workspace).as_posix(),
+                    "sha256": self._sha256(content),
+                    "created": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def _run_command(self, arguments: dict[str, Any]) -> ToolResult:
+        argv = arguments.get("argv")
+        cwd = self._resolve(arguments.get("cwd", "."))
+        timeout_seconds = arguments.get("timeout_seconds", 60)
+        if not cwd.is_dir():
+            raise ValueError("cwd is not a directory")
+        if not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 120:
+            raise ValueError("timeout_seconds must be an integer from 1 to 120")
+
+        outcome = self.command_runner.run(argv, cwd, timeout_seconds)
+        failed = outcome["timed_out"] or outcome["exit_code"] != 0
+        return ToolResult(
+            json.dumps(outcome, ensure_ascii=False),
+            is_error=failed,
+        )
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            return stream.read()
+
+    @staticmethod
+    def _write_text_atomic(path: Path, content: str) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _sha256(content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def _is_sensitive(self, path: Path) -> bool:
         lower_name = path.name.lower()
