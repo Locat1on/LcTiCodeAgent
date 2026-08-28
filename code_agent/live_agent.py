@@ -10,6 +10,7 @@ from .context import ContextManager
 from .events import AgentEvent, EventType
 from .model import ModelEventType, ModelToolCall, ToolCallParseError
 from .openrouter import OpenRouterProvider, OpenRouterRequestError
+from .restore import RestoreReport, project_session
 from .security import (
     ApprovalHandler,
     ApprovalRequest,
@@ -72,120 +73,141 @@ class LiveAgent:
     ) -> Iterator[AgentEvent]:
         self._context.add_user(user_text)
 
-        for _ in range(self.max_steps):
-            step_id = str(uuid4())
-            yield from self._maybe_compact(session_id, turn_id, step_id)
-            text_parts: list[str] = []
-            tool_calls: list[ModelToolCall] = []
-            finish_reason = "stop"
-            try:
-                for model_event in self.provider.stream(
-                    self._context.messages(),
-                    self.tools.schemas(),
-                ):
-                    if model_event.event_type is ModelEventType.TEXT_DELTA:
-                        text = model_event.text or ""
-                        text_parts.append(text)
-                        yield AgentEvent.create(
-                            EventType.ASSISTANT_DELTA,
-                            session_id,
-                            {"text": text},
-                            turn_id=turn_id,
-                            step_id=step_id,
-                        )
-                    elif model_event.event_type is ModelEventType.TOOL_CALL:
-                        if model_event.tool_call is not None:
-                            tool_calls.append(model_event.tool_call)
-                    elif model_event.event_type is ModelEventType.USAGE:
-                        if model_event.usage is not None:
-                            self.used_tokens = model_event.usage.total_tokens
+        try:
+            for _ in range(self.max_steps):
+                step_id = str(uuid4())
+                yield from self._maybe_compact(session_id, turn_id, step_id)
+                text_parts: list[str] = []
+                tool_calls: list[ModelToolCall] = []
+                finish_reason = "stop"
+                try:
+                    for model_event in self.provider.stream(
+                        self._context.messages(),
+                        self.tools.schemas(),
+                    ):
+                        if model_event.event_type is ModelEventType.TEXT_DELTA:
+                            text = model_event.text or ""
+                            text_parts.append(text)
                             yield AgentEvent.create(
-                                EventType.CONTEXT_USAGE,
+                                EventType.ASSISTANT_DELTA,
                                 session_id,
-                                {
-                                    "used_tokens": self.used_tokens,
-                                    "limit_tokens": self.context_limit,
-                                    "prompt_tokens": model_event.usage.prompt_tokens,
-                                    "completion_tokens": (
-                                        model_event.usage.completion_tokens
-                                    ),
-                                },
+                                {"text": text},
                                 turn_id=turn_id,
                                 step_id=step_id,
                             )
-                    elif model_event.event_type is ModelEventType.COMPLETED:
-                        finish_reason = model_event.finish_reason or "stop"
-            except (OpenRouterRequestError, ToolCallParseError) as error:
-                yield AgentEvent.create(
-                    EventType.ERROR,
-                    session_id,
-                    {"message": str(error), "kind": type(error).__name__},
-                    turn_id=turn_id,
-                    step_id=step_id,
-                )
-                yield AgentEvent.create(
-                    EventType.TURN_COMPLETED,
-                    session_id,
-                    {"reason": "model_error"},
-                    turn_id=turn_id,
-                    step_id=step_id,
-                )
-                return
+                        elif model_event.event_type is ModelEventType.TOOL_CALL:
+                            if model_event.tool_call is not None:
+                                tool_calls.append(model_event.tool_call)
+                        elif model_event.event_type is ModelEventType.USAGE:
+                            if model_event.usage is not None:
+                                self.used_tokens = model_event.usage.total_tokens
+                                yield AgentEvent.create(
+                                    EventType.CONTEXT_USAGE,
+                                    session_id,
+                                    {
+                                        "used_tokens": self.used_tokens,
+                                        "limit_tokens": self.context_limit,
+                                        "prompt_tokens": (
+                                            model_event.usage.prompt_tokens
+                                        ),
+                                        "completion_tokens": (
+                                            model_event.usage.completion_tokens
+                                        ),
+                                    },
+                                    turn_id=turn_id,
+                                    step_id=step_id,
+                                )
+                        elif model_event.event_type is ModelEventType.COMPLETED:
+                            finish_reason = model_event.finish_reason or "stop"
+                except (OpenRouterRequestError, ToolCallParseError) as error:
+                    yield AgentEvent.create(
+                        EventType.ERROR,
+                        session_id,
+                        {"message": str(error), "kind": type(error).__name__},
+                        turn_id=turn_id,
+                        step_id=step_id,
+                    )
+                    yield AgentEvent.create(
+                        EventType.TURN_COMPLETED,
+                        session_id,
+                        {"reason": "model_error"},
+                        turn_id=turn_id,
+                        step_id=step_id,
+                    )
+                    return
 
-            text = "".join(text_parts)
-            assistant_calls = (
-                [
+                text = "".join(text_parts)
+                assistant_calls = (
+                    [
+                        {
+                            "id": call.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.raw_arguments,
+                            },
+                        }
+                        for call in tool_calls
+                    ]
+                    if tool_calls
+                    else None
+                )
+                self._context.add_assistant(text, assistant_calls)
+                yield AgentEvent.create(
+                    EventType.ASSISTANT_MESSAGE,
+                    session_id,
                     {
-                        "id": call.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": call.name,
-                            "arguments": call.raw_arguments,
-                        },
-                    }
-                    for call in tool_calls
-                ]
-                if tool_calls
-                else None
-            )
-            self._context.add_assistant(text, assistant_calls)
-            yield AgentEvent.create(
-                EventType.ASSISTANT_MESSAGE,
-                session_id,
-                {"text": text, "finish_reason": finish_reason},
-                turn_id=turn_id,
-                step_id=step_id,
-            )
-
-            if not tool_calls:
-                yield AgentEvent.create(
-                    EventType.TURN_COMPLETED,
-                    session_id,
-                    {"reason": finish_reason},
+                        "text": text,
+                        "finish_reason": finish_reason,
+                        "tool_calls": assistant_calls,
+                    },
                     turn_id=turn_id,
                     step_id=step_id,
                 )
-                return
 
-            for call in tool_calls:
-                yield from self._execute_tool(call, session_id, turn_id, step_id)
+                if not tool_calls:
+                    yield AgentEvent.create(
+                        EventType.TURN_COMPLETED,
+                        session_id,
+                        {"reason": finish_reason},
+                        turn_id=turn_id,
+                        step_id=step_id,
+                    )
+                    return
 
-        yield AgentEvent.create(
-            EventType.ERROR,
-            session_id,
-            {"message": "maximum model steps reached", "kind": "StepLimit"},
-            turn_id=turn_id,
-        )
-        yield AgentEvent.create(
-            EventType.TURN_COMPLETED,
-            session_id,
-            {"reason": "max_steps"},
-            turn_id=turn_id,
-        )
+                for call in tool_calls:
+                    yield from self._execute_tool(call, session_id, turn_id, step_id)
+
+            yield AgentEvent.create(
+                EventType.ERROR,
+                session_id,
+                {"message": "maximum model steps reached", "kind": "StepLimit"},
+                turn_id=turn_id,
+            )
+            yield AgentEvent.create(
+                EventType.TURN_COMPLETED,
+                session_id,
+                {"reason": "max_steps"},
+                turn_id=turn_id,
+            )
+        finally:
+            self._context.refresh_state()
 
     def clear_context(self) -> None:
         self._context.clear()
         self.used_tokens = 0
+
+    def restore(self, events: list[AgentEvent]) -> RestoreReport:
+        projection = project_session(events, SYSTEM_PROMPT)
+        self._context = projection.context
+        self.used_tokens = projection.used_tokens
+        return RestoreReport(
+            events_replayed=len(events),
+            context_items=self._context.item_count,
+            estimated_tokens=self._context.estimated_tokens,
+            used_tokens=self.used_tokens,
+            interrupted_tool_calls=projection.interrupted_tool_calls,
+        )
 
     def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
         yield from self._emit_compaction(session_id, None, None, trigger="manual")

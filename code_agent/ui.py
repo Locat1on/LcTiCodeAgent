@@ -130,6 +130,7 @@ class TerminalUI:
             EventType.CONTEXT_CLEARED: self._render_context_cleared,
             EventType.CONTEXT_COMPACTION_STARTED: self._render_compaction_started,
             EventType.CONTEXT_COMPACTION_COMPLETED: self._render_compaction_completed,
+            EventType.SESSION_RESUMED: self._render_session_resumed,
             EventType.ERROR: self._render_error,
         }
         handler = handlers.get(event.event_type)
@@ -220,6 +221,18 @@ class TerminalUI:
 
     def _render_context_cleared(self, event: AgentEvent) -> None:
         self.console.print("[yellow]Context cleared; the audit log was preserved.[/yellow]")
+
+    def _render_session_resumed(self, event: AgentEvent) -> None:
+        payload = event.payload
+        parts = [
+            f"resumed session from {payload.get('events_replayed', 0)} log events",
+            f"{payload.get('context_items', 0)} context items",
+            f"~{payload.get('estimated_tokens', 0):,} estimated tokens",
+        ]
+        interrupted = payload.get("interrupted_tool_calls", 0)
+        if interrupted:
+            parts.append(f"{interrupted} interrupted tool call(s) to re-run")
+        self.console.print(f"[yellow]Session restored: {'; '.join(parts)}.[/yellow]")
 
     def _render_compaction_started(self, event: AgentEvent) -> None:
         estimated = event.payload.get("estimated_tokens", 0)

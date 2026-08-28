@@ -502,8 +502,7 @@ class ContextManager:
 
     def prune(self, *, trigger: str = "threshold") -> CompactionReport:
         before = self.estimated_tokens
-        self._refresh_layers()
-        self._collect_working_memory()
+        self.refresh_state()
         rules: dict[str, int] = {}
         pruned_event_ids: list[str] = []
         changed: dict[int, ContextItem] = {}
@@ -571,6 +570,10 @@ class ContextManager:
         ]
         self.working_memory = WorkingMemory()
 
+    def refresh_state(self) -> None:
+        self._refresh_layers()
+        self._collect_working_memory()
+
     def _refresh_layers(self) -> None:
         last_user_index = None
         for index, item in enumerate(self._items):
@@ -587,6 +590,7 @@ class ContextManager:
                 self._items[index] = replace(item, layer=layer)
 
     def _collect_working_memory(self) -> None:
+        memory = WorkingMemory()
         for item in self._items:
             if item.role != "tool":
                 continue
@@ -595,8 +599,9 @@ class ContextManager:
                 continue
             result = envelope["result"]
             parsed = result if not isinstance(result, str) else loads_if_json(result)
-            self.working_memory.record(
+            memory.record(
                 item.tool_name or "",
                 bool(envelope.get("ok")),
                 parsed,
             )
+        self.working_memory = memory

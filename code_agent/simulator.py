@@ -100,6 +100,9 @@ class SimulatedAgent:
     def clear_context(self) -> None:
         self.used_tokens = 0
 
+    def restore(self, events: list[AgentEvent]) -> None:
+        return None
+
     def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
         yield AgentEvent.create(
             EventType.CONTEXT_COMPACTION_COMPLETED,

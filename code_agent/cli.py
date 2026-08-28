@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
 from .events import AgentEvent, EventType
+from .restore import RestoreReport
 from .session import SessionLog
 from .simulator import SimulatedAgent
 from .ui import TerminalUI
+
+
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9-]+")
 
 
 class AgentBackend(Protocol):
@@ -28,6 +33,11 @@ class AgentBackend(Protocol):
         turn_id: str,
     ) -> Iterator[AgentEvent]: ...
 
+    def restore(
+        self,
+        events: list[AgentEvent],
+    ) -> RestoreReport | None: ...
+
     def clear_context(self) -> None: ...
 
     def compact_context(self, session_id: str) -> Iterator[AgentEvent]: ...
@@ -42,13 +52,18 @@ class Application:
         session_root: Path,
         ui: TerminalUI | None = None,
         agent: AgentBackend | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
-        self.log = SessionLog(session_root)
+        self.log = SessionLog(session_root, session_id=session_id)
         self.ui = ui or TerminalUI()
         self.agent = agent or SimulatedAgent()
+        self.resumed = session_id is not None
 
     def start(self) -> None:
+        if self.resumed:
+            self._resume()
+            return
         event = AgentEvent.create(
             EventType.SESSION_STARTED,
             self.log.session_id,
@@ -68,6 +83,50 @@ class Application:
             self.agent.model,
             self.agent.sandbox,
         )
+
+    def _resume(self) -> None:
+        if not SESSION_ID_PATTERN.fullmatch(self.log.session_id):
+            raise ValueError(
+                "invalid session id; expected letters, digits, and hyphens only"
+            )
+        if not self.log.path.exists():
+            raise ValueError(f"session log not found: {self.log.path}")
+        events = self.log.load()
+        first = events[0].payload if events else {}
+        report = self.agent.restore(events)
+        payload = {"events_replayed": len(events)}
+        if report is not None:
+            payload.update(report.to_payload())
+        self._publish(
+            AgentEvent.create(
+                EventType.SESSION_RESUMED,
+                self.log.session_id,
+                payload,
+            ),
+            render=False,
+        )
+        self.ui.show_header(
+            self.workspace,
+            self.log.session_id,
+            self.agent.mode,
+            self.agent.model,
+            self.agent.sandbox,
+        )
+        self.ui.console.print(
+            f"[yellow]Resumed session with {len(events)} replayed events.[/yellow]"
+        )
+        logged_workspace = str(first.get("workspace", ""))
+        if logged_workspace and logged_workspace != str(self.workspace):
+            self.ui.console.print(
+                f"[yellow]Warning: workspace changed since the session started "
+                f"({logged_workspace}).[/yellow]"
+            )
+        logged_model = str(first.get("model", ""))
+        if logged_model and logged_model != self.agent.model:
+            self.ui.console.print(
+                f"[yellow]Warning: model changed since the session started "
+                f"({logged_model}).[/yellow]"
+            )
 
     def run_turn(self, user_text: str) -> None:
         turn_id = str(uuid4())
@@ -147,6 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         help="run one task and exit; combine with --live for a real model call",
     )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="restore a previous session's model context from its JSONL log "
+        "(requires --live)",
+    )
     return parser
 
 
@@ -155,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     ui = TerminalUI()
     agent: AgentBackend | None = None
+    if args.resume and not args.live:
+        ui.console.print(
+            "[red]--resume requires --live: only the live agent keeps "
+            "restorable model context.[/red]"
+        )
+        return 2
     if args.live:
         from .command import CommandRunner
         from .live_agent import LiveAgent
@@ -178,8 +249,18 @@ def main(argv: list[str] | None = None) -> int:
             approval_handler=ui.ask_approval,
         )
 
-    app = Application(args.workspace, args.session_root, ui=ui, agent=agent)
-    app.start()
+    app = Application(
+        args.workspace,
+        args.session_root,
+        ui=ui,
+        agent=agent,
+        session_id=args.resume,
+    )
+    try:
+        app.start()
+    except ValueError as error:
+        ui.console.print(f"[red]Resume failed: {error}[/red]")
+        return 2
 
     one_shot_prompt = args.prompt
     if args.demo:
