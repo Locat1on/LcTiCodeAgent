@@ -39,5 +39,28 @@ class SessionLogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different session"):
                 log.append(event)
 
+    def test_recall_returns_matching_event(self) -> None:
+        with test_directory() as directory:
+            log = SessionLog(directory, session_id="session-1")
+            first = AgentEvent.create(EventType.USER_MESSAGE, log.session_id, {"text": "a"})
+            second = AgentEvent.create(
+                EventType.TOOL_COMPLETED,
+                log.session_id,
+                {"name": "read_file", "content": "1: line"},
+            )
+            log.append(first)
+            log.append(second)
+
+            self.assertEqual(log.recall(second.event_id), second)
+
+    def test_recall_returns_none_for_unknown_id(self) -> None:
+        with test_directory() as directory:
+            log = SessionLog(directory, session_id="session-1")
+            log.append(AgentEvent.create(EventType.USER_MESSAGE, log.session_id))
+
+            self.assertIsNone(log.recall("missing-event"))
+            empty = SessionLog(directory, session_id="session-empty")
+            self.assertIsNone(empty.recall("missing-event"))
+
 if __name__ == "__main__":
     unittest.main()
