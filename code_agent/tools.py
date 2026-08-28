@@ -263,6 +263,49 @@ class ToolRegistry:
                     },
                     handler=self._git_log,
                 ),
+                ToolDefinition(
+                    name="git_commit",
+                    description=(
+                        "Create one local Git commit containing only explicitly listed "
+                        "workspace files after preflight and user approval."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 50,
+                            },
+                            "message": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                        },
+                        "required": ["files", "message"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._git_commit,
+                ),
+                ToolDefinition(
+                    name="git_push",
+                    description=(
+                        "Push current HEAD to an existing same-name remote branch "
+                        "after preflight and one-time user approval. Force, delete, "
+                        "mirror, tags, and arbitrary refspecs are not supported."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "remote": {"type": "string", "default": "origin"},
+                            "branch": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=self._git_push,
+                ),
             )
         }
 
@@ -277,6 +320,30 @@ class ToolRegistry:
             return definition.handler(arguments)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             return ToolResult(str(error), is_error=True)
+
+    def approval_context(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if name == "fetch_url":
+            return {
+                "operation": "fetch_url",
+                "url": arguments.get("url"),
+                "method": arguments.get("method", "GET"),
+                "max_bytes": arguments.get("max_bytes", 200_000),
+            }
+        if name == "git_commit":
+            return self.git_inspector.commit_preflight(
+                files=arguments.get("files"),
+                message=arguments.get("message"),
+            )
+        if name == "git_push":
+            return self.git_inspector.push_preflight(
+                remote=arguments.get("remote", "origin"),
+                branch=arguments.get("branch"),
+            )
+        return {"operation": name, "arguments": arguments}
 
     def _resolve(self, relative_path: str) -> Path:
         if not isinstance(relative_path, str) or not relative_path.strip():
@@ -474,6 +541,28 @@ class ToolRegistry:
         return ToolResult(
             json.dumps(
                 self.git_inspector.log(max_count=arguments.get("max_count", 10)),
+                ensure_ascii=False,
+            )
+        )
+
+    def _git_commit(self, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            json.dumps(
+                self.git_inspector.commit(
+                    files=arguments.get("files"),
+                    message=arguments.get("message"),
+                ),
+                ensure_ascii=False,
+            )
+        )
+
+    def _git_push(self, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            json.dumps(
+                self.git_inspector.push(
+                    remote=arguments.get("remote", "origin"),
+                    branch=arguments.get("branch"),
+                ),
                 ensure_ascii=False,
             )
         )

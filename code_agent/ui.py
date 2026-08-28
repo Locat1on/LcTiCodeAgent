@@ -161,6 +161,7 @@ class TerminalUI:
                         f"Risk: {event.payload.get('risk', 'unknown')}",
                         f"Reason: {event.payload.get('reason', '')}",
                         f"Arguments: {arguments}",
+                        f"Preflight: {event.payload.get('context', {})}",
                     )
                 ),
                 title="Permission required",

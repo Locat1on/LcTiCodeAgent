@@ -39,6 +39,7 @@ class ApprovalRequest:
     risk: RiskClass
     reason: str
     arguments: dict[str, Any]
+    context: dict[str, Any]
 
     @classmethod
     def create(
@@ -46,6 +47,7 @@ class ApprovalRequest:
         tool_name: str,
         rule: PermissionRule,
         arguments: dict[str, Any],
+        context: dict[str, Any],
     ) -> ApprovalRequest:
         return cls(
             request_id=str(uuid4()),
@@ -53,6 +55,7 @@ class ApprovalRequest:
             risk=rule.risk,
             reason=rule.reason,
             arguments=arguments,
+            context=context,
         )
 
 

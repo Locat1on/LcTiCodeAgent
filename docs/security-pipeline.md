@@ -30,6 +30,12 @@ Tool Call
 
 `git_status`、`git_diff`和`git_log`使用固定参数数组，不经过Shell，也不触发Git网络和写操作。路径参数仍受工作区边界检查。
 
+## Git写入和推送
+
+`git_commit`只提交明确列出的工作区文件。Preflight包含HEAD、文件哈希、状态、Diff摘要、无关已暂存文件和高置信度凭据扫描。审批后重新计算状态令牌；任何变化都会使原审批失效。
+
+`git_push`只允许当前HEAD推送到已有远程的同名分支，命令固定为 `git push --porcelain <remote> HEAD:refs/heads/<branch>`。工具Schema不提供force、mirror、delete、tag或任意refspec入口。Preflight显示远程URL、分支、HEAD、远程HEAD、待推送提交和涉及文件，并对HEAD内容执行凭据扫描。
+
 ## 审计
 
 会话日志分别记录：

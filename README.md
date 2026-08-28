@@ -18,6 +18,7 @@
 - 默认启用的轻量Workspace Policy Sandbox
 - `ALLOW / ASK / DENY` 权限管线和单次CLI审批
 - 受控HTTPS文本获取与Git只读检查工具
+- 带Preflight、状态令牌和单次审批的选择性Git commit/push
 
 ## 运行
 
