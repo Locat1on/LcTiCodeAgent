@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import subprocess
 from types import SimpleNamespace
 
 from code_agent.events import EventType
@@ -32,6 +33,28 @@ class _FetchProvider:
                 "fetch_url",
                 {"url": "https://example.com"},
                 '{"url":"https://example.com"}',
+            )
+            yield ModelEvent(ModelEventType.TOOL_CALL, tool_call=call)
+            yield ModelEvent(ModelEventType.COMPLETED, finish_reason="tool_calls")
+        else:
+            yield ModelEvent(ModelEventType.TEXT_DELTA, text="done")
+            yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
+        self.step += 1
+
+
+class _GitCommitProvider:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(context_budget=32_000, model="test-model")
+        self.step = 0
+
+    def stream(self, messages, tools):
+        if self.step == 0:
+            arguments = {"files": ["example.py"], "message": "update example"}
+            call = ModelToolCall(
+                "commit-1",
+                "git_commit",
+                arguments,
+                '{"files":["example.py"],"message":"update example"}',
             )
             yield ModelEvent(ModelEventType.TOOL_CALL, tool_call=call)
             yield ModelEvent(ModelEventType.COMPLETED, finish_reason="tool_calls")
@@ -117,6 +140,68 @@ class SecurityPipelineTests(unittest.TestCase):
             if event.event_type is EventType.TOOL_APPROVAL_DECIDED
         )
         self.assertFalse(decision.payload["approved"])
+
+    def test_state_change_after_approval_blocks_commit(self) -> None:
+        with test_directory() as workspace:
+            self._git(workspace, "init", "-q", "-b", "main")
+            self._git(workspace, "config", "user.name", "Test User")
+            self._git(workspace, "config", "user.email", "test@example.com")
+            source = workspace / "example.py"
+            source.write_text("value = 1\n", encoding="utf-8")
+            self._git(workspace, "add", "example.py")
+            self._git(workspace, "commit", "-q", "-m", "initial")
+            source.write_text("value = 2\n", encoding="utf-8")
+
+            def mutate_during_approval(request):
+                source.write_text("value = 3\n", encoding="utf-8")
+                return True
+
+            agent = LiveAgent(
+                _GitCommitProvider(),
+                ToolRegistry(workspace),
+                approval_handler=mutate_during_approval,
+            )
+            events = list(agent.respond("Commit change", "session-1", "turn-1"))
+            log = self._git_output(workspace, "log", "--oneline")
+
+        failures = [
+            event
+            for event in events
+            if event.event_type is EventType.TOOL_FAILED
+        ]
+        self.assertEqual(len(log.splitlines()), 1)
+        self.assertTrue(
+            any("state changed" in event.payload["error"] for event in failures)
+        )
+
+    @staticmethod
+    def _git(workspace, *arguments) -> None:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+
+    @staticmethod
+    def _git_output(workspace, *arguments) -> str:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+        return completed.stdout
 
 
 if __name__ == "__main__":
