@@ -35,6 +35,12 @@ class SessionLog:
             stream.write("\n")
         self._event_count += 1
 
+    def recall(self, event_id: str) -> AgentEvent | None:
+        for event in self.load():
+            if event.event_id == event_id:
+                return event
+        return None
+
     def load(self) -> list[AgentEvent]:
         if not self.path.exists():
             return []

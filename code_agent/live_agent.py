@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
+from .context import ContextManager
 from .events import AgentEvent, EventType
 from .model import ModelEventType, ModelToolCall, ToolCallParseError
 from .openrouter import OpenRouterProvider, OpenRouterRequestError
@@ -17,6 +18,9 @@ from .security import (
     deny_approval,
 )
 from .tools import ToolRegistry, ToolResult
+
+
+COMPACTION_TRIGGER_RATIO = 0.6
 
 
 SYSTEM_PROMPT = """You are LcTiCodeAgent, a terminal coding assistant.
@@ -54,9 +58,8 @@ class LiveAgent:
         self.approval_handler = approval_handler
         self.context_limit = provider.config.context_budget
         self.used_tokens = 0
-        self._messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        self._context = ContextManager(SYSTEM_PROMPT)
+        self._compaction_threshold = int(self.context_limit * COMPACTION_TRIGGER_RATIO)
 
     def respond(
         self,
@@ -64,16 +67,17 @@ class LiveAgent:
         session_id: str,
         turn_id: str,
     ) -> Iterator[AgentEvent]:
-        self._messages.append({"role": "user", "content": user_text})
+        self._context.add_user(user_text)
 
         for _ in range(self.max_steps):
             step_id = str(uuid4())
+            yield from self._maybe_compact(session_id, turn_id, step_id)
             text_parts: list[str] = []
             tool_calls: list[ModelToolCall] = []
             finish_reason = "stop"
             try:
                 for model_event in self.provider.stream(
-                    self._messages,
+                    self._context.messages(),
                     self.tools.schemas(),
                 ):
                     if model_event.event_type is ModelEventType.TEXT_DELTA:
@@ -126,12 +130,8 @@ class LiveAgent:
                 return
 
             text = "".join(text_parts)
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": text or None,
-            }
-            if tool_calls:
-                assistant_message["tool_calls"] = [
+            assistant_calls = (
+                [
                     {
                         "id": call.call_id,
                         "type": "function",
@@ -142,7 +142,10 @@ class LiveAgent:
                     }
                     for call in tool_calls
                 ]
-            self._messages.append(assistant_message)
+                if tool_calls
+                else None
+            )
+            self._context.add_assistant(text, assistant_calls)
             yield AgentEvent.create(
                 EventType.ASSISTANT_MESSAGE,
                 session_id,
@@ -178,8 +181,66 @@ class LiveAgent:
         )
 
     def clear_context(self) -> None:
-        self._messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._context.clear()
         self.used_tokens = 0
+
+    def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
+        yield from self._emit_compaction(session_id, None, None, trigger="manual")
+
+    def context_stats(self) -> dict[str, Any]:
+        stats = self._context.layer_stats()
+        stats["used_tokens"] = self.used_tokens
+        stats["limit_tokens"] = self.context_limit
+        memory = self._context.working_memory
+        stats["working_memory"] = {
+            "modified_files": len(memory.modified_files),
+            "verified_commands": len(memory.verified_commands),
+            "open_errors": len(memory.open_errors),
+        }
+        return stats
+
+    def _maybe_compact(
+        self,
+        session_id: str,
+        turn_id: str,
+        step_id: str,
+    ) -> Iterator[AgentEvent]:
+        if self._context.estimated_tokens <= self._compaction_threshold:
+            return
+        yield from self._emit_compaction(
+            session_id,
+            turn_id,
+            step_id,
+            trigger="threshold",
+        )
+
+    def _emit_compaction(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        step_id: str | None,
+        *,
+        trigger: str,
+    ) -> Iterator[AgentEvent]:
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_STARTED,
+            session_id,
+            {
+                "trigger": trigger,
+                "estimated_tokens": self._context.estimated_tokens,
+                "limit_tokens": self.context_limit,
+            },
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+        report = self._context.prune(trigger=trigger)
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            report.to_payload(),
+            turn_id=turn_id,
+            step_id=step_id,
+        )
 
     def _execute_tool(
         self,
@@ -207,6 +268,7 @@ class LiveAgent:
             yield from self._record_tool_result(
                 result,
                 common,
+                call.arguments,
                 session_id,
                 turn_id,
                 step_id,
@@ -224,6 +286,7 @@ class LiveAgent:
                 yield from self._record_tool_result(
                     result,
                     common,
+                    call.arguments,
                     session_id,
                     turn_id,
                     step_id,
@@ -268,6 +331,7 @@ class LiveAgent:
                 yield from self._record_tool_result(
                     result,
                     common,
+                    call.arguments,
                     session_id,
                     turn_id,
                     step_id,
@@ -286,6 +350,7 @@ class LiveAgent:
                 yield from self._record_tool_result(
                     result,
                     common,
+                    call.arguments,
                     session_id,
                     turn_id,
                     step_id,
@@ -299,6 +364,7 @@ class LiveAgent:
                 yield from self._record_tool_result(
                     result,
                     common,
+                    call.arguments,
                     session_id,
                     turn_id,
                     step_id,
@@ -316,6 +382,7 @@ class LiveAgent:
         yield from self._record_tool_result(
             result,
             common,
+            call.arguments,
             session_id,
             turn_id,
             step_id,
@@ -325,6 +392,7 @@ class LiveAgent:
         self,
         result: ToolResult,
         common: dict[str, Any],
+        arguments: dict[str, Any],
         session_id: str,
         turn_id: str,
         step_id: str,
@@ -337,17 +405,18 @@ class LiveAgent:
         }
         if result.is_error:
             payload["error"] = result.content
-        yield AgentEvent.create(
+        event = AgentEvent.create(
             event_type,
             session_id,
             payload,
             turn_id=turn_id,
             step_id=step_id,
         )
-        self._messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": common["call_id"],
-                "content": result.as_message_content(),
-            }
+        yield event
+        self._context.add_tool(
+            call_id=common["call_id"],
+            tool_name=common["name"],
+            arguments=arguments,
+            content=result.as_message_content(),
+            source_event_id=event.event_id,
         )
