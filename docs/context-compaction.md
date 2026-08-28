@@ -42,6 +42,7 @@
 | `git_status`/`git_diff`/`git_log` | 与命令同构；成功时保留 stdout 头部 1200 字符（分支/HEAD 等首行证据） |
 | `read_file` | 保留路径、行范围、原事件 ID 和前 3 行，正文降级 |
 | `list_files` | 保留条目数量与截断标记 |
+| `search_text` | 保留 query、路径、引擎、检索文件数、returned、truncated 与命中数量，丢弃 matches 列表 |
 | `fetch_url` | 保留 url、status、content_type、字节数；正文截断到 600 字符 |
 | 其他大 JSON | 超长字符串字段截断到 600 字符 |
 

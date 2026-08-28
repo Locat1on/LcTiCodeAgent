@@ -2,7 +2,7 @@
 
 一个从零实现的可对话终端编程智能体。本项目不依赖任何 Agent 框架或 SDK，模型交互、会话历史、上下文管理、工具执行、循环终止与错误处理均由项目自行实现。
 
-当前已建立追加式事件日志、可对话终端 UI、OpenRouter 流式 Function Calling、本地文件与受限命令工具、Workspace Policy Sandbox 权限管线，以及任务感知的确定性上下文压缩（第一层：工具结果裁剪，证据可经会话日志恢复）。
+当前已建立追加式事件日志、可对话终端 UI、OpenRouter 流式 Function Calling、本地文件与受限命令工具、工作区文本搜索、Workspace Policy Sandbox 权限管线，以及任务感知的确定性上下文压缩（第一层：工具结果裁剪，证据可经会话日志恢复）。
 
 ## 当前功能
 
@@ -15,7 +15,7 @@
 - `/help`、`/status`、`/context`、`/compact`、`/clear`、`/exit` 命令
 - `--demo` 非交互演示模式，便于测试和录制
 - OpenRouter 上 `google/gemini-3.7-flash` 的流式 Function Calling
-- 本地读取、精确替换、新建文件和验证命令工具
+- 本地读取、工作区正则文本搜索、精确替换、新建文件和验证命令工具
 - 默认启用的轻量Workspace Policy Sandbox
 - `ALLOW / ASK / DENY` 权限管线和单次CLI审批
 - 受控HTTPS文本获取与Git只读检查工具
