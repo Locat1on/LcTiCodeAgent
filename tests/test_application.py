@@ -30,5 +30,40 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(events[0].event_type, EventType.SESSION_STARTED)
         self.assertEqual(events[-1].event_type, EventType.TURN_COMPLETED)
 
+    def test_compact_context_publishes_event_and_renders(self) -> None:
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=100)
+
+        with test_directory() as directory:
+            app = Application(Path.cwd(), directory, TerminalUI(console))
+            app.start()
+            app.compact_context()
+            events = app.log.load()
+
+        rendered = output.getvalue()
+        self.assertIn("nothing pruned", rendered)
+        self.assertEqual(
+            events[-1].event_type,
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+        )
+        self.assertFalse(events[-1].payload["changed"])
+
+    def test_show_context_renders_layered_report(self) -> None:
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=100)
+
+        with test_directory() as directory:
+            app = Application(Path.cwd(), directory, TerminalUI(console))
+            app.start()
+            app.run_turn("检查注册功能")
+            app.show_context()
+
+        rendered = output.getvalue()
+        self.assertIn("Context", rendered)
+        self.assertIn("Model usage", rendered)
+        self.assertIn("Pinned", rendered)
+        self.assertIn("Recent", rendered)
+        self.assertIn("Evidence", rendered)
+
 if __name__ == "__main__":
     unittest.main()
