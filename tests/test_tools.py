@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import unittest
@@ -34,7 +35,9 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_read_file_returns_numbered_range(self) -> None:
         with test_directory() as workspace:
-            (workspace / "example.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            source = workspace / "example.py"
+            source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             registry = ToolRegistry(workspace)
 
             result = registry.execute(
@@ -43,7 +46,7 @@ class ToolRegistryTests(unittest.TestCase):
             )
 
         self.assertFalse(result.is_error)
-        self.assertEqual(result.content, "2: two\n3: three")
+        self.assertEqual(result.content, f"sha256: {digest}\n2: two\n3: three")
 
     def test_path_escape_and_sensitive_file_are_denied(self) -> None:
         with test_directory() as workspace:
@@ -152,6 +155,7 @@ class ToolRegistryTests(unittest.TestCase):
         with test_directory() as workspace:
             source = workspace / "example.py"
             source.write_text("value = 1\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             registry = ToolRegistry(workspace)
 
             result = registry.execute(
@@ -160,6 +164,7 @@ class ToolRegistryTests(unittest.TestCase):
                     "path": "example.py",
                     "old_text": "value = 1",
                     "new_text": "value = 2",
+                    "expected_sha256": digest,
                 },
             )
             updated = source.read_text(encoding="utf-8")
@@ -175,11 +180,17 @@ class ToolRegistryTests(unittest.TestCase):
         with test_directory() as workspace:
             source = workspace / "example.txt"
             source.write_text("same\nsame\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             registry = ToolRegistry(workspace)
 
             result = registry.execute(
                 "replace_in_file",
-                {"path": "example.txt", "old_text": "same", "new_text": "new"},
+                {
+                    "path": "example.txt",
+                    "old_text": "same",
+                    "new_text": "new",
+                    "expected_sha256": digest,
+                },
             )
             preserved = source.read_text(encoding="utf-8")
 

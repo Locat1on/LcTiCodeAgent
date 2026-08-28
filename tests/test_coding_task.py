@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unittest
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ class _ScriptedCodingProvider:
         self.step = 0
 
     def stream(self, messages, tools):
+        read_digest = self._sha256_from_read(messages, "read-1")
         calls = [
             self._call("read-1", "read_file", {"path": "calculator.py"}),
             self._call("read-2", "read_file", {"path": "tests/test_calculator.py"}),
@@ -50,6 +52,7 @@ class _ScriptedCodingProvider:
                         "        return 0.0\n"
                         "    return sum(values) / len(values)"
                     ),
+                    "expected_sha256": read_digest,
                 },
             ),
             self._call(
@@ -83,6 +86,22 @@ class _ScriptedCodingProvider:
     def _call(call_id: str, name: str, arguments: dict) -> ModelToolCall:
         raw_arguments = json.dumps(arguments)
         return ModelToolCall(call_id, name, arguments, raw_arguments)
+
+    @staticmethod
+    def _sha256_from_read(messages, tool_call_id: str) -> str:
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            if message.get("tool_call_id") != tool_call_id:
+                continue
+            try:
+                result = json.loads(message["content"])["result"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            match = re.search(r"^sha256: ([0-9a-f]{64})$", result, re.MULTILINE)
+            if match:
+                return match.group(1)
+        return ""
 
 
 class CodingTaskTests(unittest.TestCase):

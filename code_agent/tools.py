@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -109,7 +110,10 @@ class ToolRegistry:
                     name="read_file",
                     description=(
                         "Read up to 200 numbered lines from a UTF-8 text file "
-                        "inside the workspace. Sensitive credential files are denied."
+                        "inside the workspace. The first line of the result is "
+                        "the sha256 digest of the whole file; pass it back as "
+                        "expected_sha256 when editing. Sensitive credential "
+                        "files are denied."
                     ),
                     parameters={
                         "type": "object",
@@ -164,7 +168,9 @@ class ToolRegistry:
                     name="replace_in_file",
                     description=(
                         "Replace exactly one occurrence of old_text in an existing "
-                        "UTF-8 file inside the workspace. Read the file first."
+                        "UTF-8 file inside the workspace. Read the file first and "
+                        "pass its sha256 digest as expected_sha256; the edit is "
+                        "rejected if the file changed since that read."
                     ),
                     parameters={
                         "type": "object",
@@ -172,8 +178,12 @@ class ToolRegistry:
                             "path": {"type": "string"},
                             "old_text": {"type": "string"},
                             "new_text": {"type": "string"},
+                            "expected_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-fA-F]{64}$",
+                            },
                         },
-                        "required": ["path", "old_text", "new_text"],
+                        "required": ["path", "old_text", "new_text", "expected_sha256"],
                         "additionalProperties": False,
                     },
                     handler=self._replace_in_file,
@@ -457,6 +467,7 @@ class ToolRegistry:
             f"{number}: {line}"
             for number, line in enumerate(selected, start=start_line)
         )
+        numbered = f"sha256: {self._sha256(text)}\n{numbered}"
         if len(numbered) > 32_000:
             numbered = numbered[:32_000] + "\n[output truncated at 32000 characters]"
         return ToolResult(numbered)
@@ -506,8 +517,21 @@ class ToolRegistry:
             raise ValueError("new_text must be a string")
         if len(new_text) > 200_000:
             raise ValueError("new_text exceeds the 200000 character limit")
+        expected_sha256 = arguments.get("expected_sha256")
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", expected_sha256
+        ):
+            raise ValueError(
+                "expected_sha256 must be the 64-character sha256 digest "
+                "returned by read_file"
+            )
 
         original = self._read_text(path)
+        if self._sha256(original) != expected_sha256.lower():
+            raise ValueError(
+                "file changed since it was read; re-read the file and retry "
+                "with the current sha256"
+            )
         occurrences = original.count(old_text)
         if occurrences != 1:
             raise ValueError(
