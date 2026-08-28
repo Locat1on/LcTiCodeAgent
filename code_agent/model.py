@@ -78,11 +78,17 @@ class ToolCallAccumulator:
 
     def finish(self) -> list[ModelToolCall]:
         calls: list[ModelToolCall] = []
+        seen_ids: set[str] = set()
         for index, buffer in sorted(self._calls.items()):
             name = "".join(buffer.name_parts)
             raw_arguments = "".join(buffer.argument_parts) or "{}"
             if not buffer.call_id:
                 raise ToolCallParseError(f"tool call {index} has no id")
+            if buffer.call_id in seen_ids:
+                raise ToolCallParseError(
+                    f"duplicate tool call id: {buffer.call_id}"
+                )
+            seen_ids.add(buffer.call_id)
             if not name:
                 raise ToolCallParseError(f"tool call {index} has no function name")
             try:
