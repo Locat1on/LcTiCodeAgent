@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from .command import CommandRunner
+from .command import CommandExecutor, CommandRunner
+from .git_tools import GitInspector
+from .network import UrlFetcher
 
 
 IGNORED_DIRECTORIES = {
@@ -68,10 +70,14 @@ class ToolRegistry:
         self,
         workspace: Path,
         *,
-        command_runner: CommandRunner | None = None,
+        command_runner: CommandExecutor | None = None,
+        url_fetcher: UrlFetcher | None = None,
+        git_inspector: GitInspector | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.command_runner = command_runner or CommandRunner()
+        self.url_fetcher = url_fetcher or UrlFetcher()
+        self.git_inspector = git_inspector or GitInspector(self.workspace)
         self._definitions = {
             definition.name: definition
             for definition in (
@@ -186,6 +192,77 @@ class ToolRegistry:
                     },
                     handler=self._run_command,
                 ),
+                ToolDefinition(
+                    name="fetch_url",
+                    description=(
+                        "Fetch public text over HTTPS after user approval. Only GET "
+                        "and HEAD are supported; private addresses and URL credentials "
+                        "are denied."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string"},
+                            "method": {
+                                "type": "string",
+                                "enum": ["GET", "HEAD"],
+                                "default": "GET",
+                            },
+                            "max_bytes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1_000_000,
+                                "default": 200_000,
+                            },
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._fetch_url,
+                ),
+                ToolDefinition(
+                    name="git_status",
+                    description="Show the current branch and concise working tree status.",
+                    parameters={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                    handler=self._git_status,
+                ),
+                ToolDefinition(
+                    name="git_diff",
+                    description=(
+                        "Show a read-only Git diff for the whole workspace or one "
+                        "workspace-relative path."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "staged": {"type": "boolean", "default": False},
+                            "path": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=self._git_diff,
+                ),
+                ToolDefinition(
+                    name="git_log",
+                    description="Show up to 20 recent commits without changing the repository.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "max_count": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 20,
+                                "default": 10,
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                    handler=self._git_log,
+                ),
             )
         }
 
@@ -198,7 +275,7 @@ class ToolRegistry:
             return ToolResult(f"unknown tool: {name}", is_error=True)
         try:
             return definition.handler(arguments)
-        except (OSError, TypeError, ValueError) as error:
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
             return ToolResult(str(error), is_error=True)
 
     def _resolve(self, relative_path: str) -> Path:
@@ -364,6 +441,41 @@ class ToolRegistry:
         return ToolResult(
             json.dumps(outcome, ensure_ascii=False),
             is_error=failed,
+        )
+
+    def _fetch_url(self, arguments: dict[str, Any]) -> ToolResult:
+        result = self.url_fetcher.fetch(
+            arguments.get("url"),
+            method=arguments.get("method", "GET"),
+            max_bytes=arguments.get("max_bytes", 200_000),
+        )
+        return ToolResult(json.dumps(result, ensure_ascii=False))
+
+    def _git_status(self, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            json.dumps(self.git_inspector.status(), ensure_ascii=False)
+        )
+
+    def _git_diff(self, arguments: dict[str, Any]) -> ToolResult:
+        staged = arguments.get("staged", False)
+        if not isinstance(staged, bool):
+            raise ValueError("staged must be a boolean")
+        path = arguments.get("path")
+        if path is not None and not isinstance(path, str):
+            raise ValueError("path must be a string")
+        return ToolResult(
+            json.dumps(
+                self.git_inspector.diff(staged=staged, path=path),
+                ensure_ascii=False,
+            )
+        )
+
+    def _git_log(self, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            json.dumps(
+                self.git_inspector.log(max_count=arguments.get("max_count", 10)),
+                ensure_ascii=False,
+            )
         )
 
     @staticmethod
