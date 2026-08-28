@@ -73,6 +73,14 @@ class SecurityPipelineTests(unittest.TestCase):
             PermissionDecision.ALLOW,
         )
         self.assertEqual(
+            policy.evaluate("search_text").decision,
+            PermissionDecision.ALLOW,
+        )
+        self.assertEqual(
+            policy.evaluate("search_text").risk,
+            RiskClass.READ,
+        )
+        self.assertEqual(
             policy.evaluate("fetch_url").decision,
             PermissionDecision.ASK,
         )

@@ -293,6 +293,42 @@ class DeterministicPruningTests(unittest.TestCase):
         self.assertTrue(result["pruned"])
         self.assertEqual(result["event_id"], "event-original")
 
+    def test_search_text_result_keeps_match_count(self) -> None:
+        matches = [
+            {"path": f"src/file_{index}.py", "line": index + 1, "snippet": "s" * 200}
+            for index in range(60)
+        ]
+        manager = _manager_with_tool_result(
+            tool_name="search_text",
+            arguments={"query": "needle"},
+            content=_envelope(
+                json.dumps(
+                    {
+                        "query": "needle",
+                        "path": ".",
+                        "engine": "python",
+                        "files_searched": 3,
+                        "returned": 60,
+                        "truncated": False,
+                        "matches": matches,
+                    }
+                )
+            ),
+        )
+
+        report = manager.prune(trigger="manual")
+
+        result = json.loads(json.loads(_tool_content(manager))["result"])
+        self.assertEqual(result["match_count"], 60)
+        self.assertEqual(result["query"], "needle")
+        self.assertEqual(result["engine"], "python")
+        self.assertEqual(result["files_searched"], 3)
+        self.assertFalse(result["truncated"])
+        self.assertTrue(result["pruned"])
+        self.assertEqual(result["event_id"], "event-original")
+        self.assertNotIn("matches", result)
+        self.assertEqual(report.rules, {"search_text": 1})
+
     def test_git_read_keeps_stdout_head(self) -> None:
         stdout = "## main...origin/main\n" + "M code_agent/tools.py\n" * 200
         manager = _manager_with_tool_result(

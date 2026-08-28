@@ -70,6 +70,84 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertFalse(example.is_error)
         self.assertTrue(local.is_error)
 
+    def test_search_text_finds_matches_and_skips_sensitive_files(self) -> None:
+        with test_directory() as workspace:
+            (workspace / "notes.txt").write_text("needle in notes\n", encoding="utf-8")
+            (workspace / "server.pem").write_text("needle in cert\n", encoding="utf-8")
+            (workspace / "id_rsa").write_text("needle in key\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute("search_text", {"query": "needle"})
+
+        self.assertFalse(result.is_error)
+        payload = json.loads(result.content)
+        paths = [match["path"] for match in payload["matches"]]
+        self.assertEqual(paths, ["notes.txt"])
+        self.assertEqual(payload["returned"], 1)
+        self.assertIn("line", payload["matches"][0])
+        self.assertIn("snippet", payload["matches"][0])
+
+    def test_search_text_validates_arguments(self) -> None:
+        with test_directory() as workspace:
+            (workspace / "app.py").write_text("needle\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            missing = registry.execute("search_text", {})
+            empty = registry.execute("search_text", {"query": "  "})
+            low = registry.execute("search_text", {"query": "x", "max_results": 0})
+            high = registry.execute("search_text", {"query": "x", "max_results": 201})
+            escaped = registry.execute(
+                "search_text", {"query": "x", "path": "../outside"}
+            )
+
+        self.assertTrue(missing.is_error)
+        self.assertIn("query", missing.content)
+        self.assertTrue(empty.is_error)
+        self.assertTrue(low.is_error)
+        self.assertIn("max_results", low.content)
+        self.assertTrue(high.is_error)
+        self.assertTrue(escaped.is_error)
+        self.assertIn("outside", escaped.content)
+
+    def test_search_text_caps_serialized_payload(self) -> None:
+        class _StubSearcher:
+            def __init__(self, result):
+                self.result = result
+
+            def search(self, query, *, relative_path=".", max_results=50):
+                return self.result
+
+        with test_directory() as workspace:
+            stub = _StubSearcher(
+                {
+                    "query": "needle",
+                    "path": ".",
+                    "engine": "stub",
+                    "files_searched": 1,
+                    "returned": 200,
+                    "truncated": False,
+                    "matches": [
+                        {
+                            "path": f"dir_{index // 50}/file_{index}.py",
+                            "line": 1,
+                            "snippet": "n" * 200,
+                        }
+                        for index in range(200)
+                    ],
+                }
+            )
+            registry = ToolRegistry(workspace, searcher=stub)
+
+            result = registry.execute(
+                "search_text", {"query": "needle", "max_results": 200}
+            )
+
+        self.assertFalse(result.is_error)
+        self.assertLessEqual(len(result.content), 24_000)
+        payload = json.loads(result.content)
+        self.assertTrue(payload["truncated"])
+        self.assertLess(payload["returned"], 200)
+
     def test_replace_requires_one_exact_match(self) -> None:
         with test_directory() as workspace:
             source = workspace / "example.py"
