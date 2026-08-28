@@ -278,6 +278,20 @@ class DeterministicPruningTests(unittest.TestCase):
         self.assertIn("1: line body padding padding", result)
         self.assertLess(len(result), len(_numbered_lines(180)))
 
+    def test_read_file_pruning_preserves_sha256_line(self) -> None:
+        digest = "b" * 64
+        content = f"sha256: {digest}\n" + _numbered_lines(180)
+        manager = _manager_with_tool_result(
+            tool_name="read_file",
+            arguments={"path": "src/a.py", "start_line": 1, "end_line": 180},
+            content=_envelope(content),
+        )
+
+        manager.prune(trigger="manual")
+
+        result = json.loads(_tool_content(manager))["result"]
+        self.assertIn(f"sha256: {digest}", result)
+
     def test_list_files_result_keeps_entry_count(self) -> None:
         entries = [{"path": f"file_{index}.py", "type": "file"} for index in range(60)]
         manager = _manager_with_tool_result(

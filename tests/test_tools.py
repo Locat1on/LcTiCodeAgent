@@ -198,6 +198,92 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("found 2", result.content)
         self.assertEqual(preserved, "same\nsame\n")
 
+    def test_replace_accepts_sha256_returned_by_read_file(self) -> None:
+        with test_directory() as workspace:
+            source = workspace / "example.py"
+            source.write_text("alpha\nbeta\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            read = registry.execute(
+                "read_file",
+                {"path": "example.py", "start_line": 1, "end_line": 1},
+            )
+            digest = read.content.splitlines()[0].removeprefix("sha256: ")
+            result = registry.execute(
+                "replace_in_file",
+                {
+                    "path": "example.py",
+                    "old_text": "beta",
+                    "new_text": "gamma",
+                    "expected_sha256": digest,
+                },
+            )
+            updated = source.read_text(encoding="utf-8")
+
+        self.assertFalse(read.is_error)
+        self.assertFalse(result.is_error)
+        self.assertIn("gamma", updated)
+
+    def test_replace_rejects_stale_sha256_and_keeps_file(self) -> None:
+        with test_directory() as workspace:
+            source = workspace / "example.py"
+            source.write_text("first version\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            read = registry.execute("read_file", {"path": "example.py"})
+            digest = read.content.splitlines()[0].removeprefix("sha256: ")
+            source.write_text("rewritten externally\n", encoding="utf-8")
+            result = registry.execute(
+                "replace_in_file",
+                {
+                    "path": "example.py",
+                    "old_text": "rewritten externally",
+                    "new_text": "edited by agent",
+                    "expected_sha256": digest,
+                },
+            )
+            preserved = source.read_text(encoding="utf-8")
+
+        self.assertTrue(result.is_error)
+        self.assertIn("changed since", result.content)
+        self.assertIn("re-read", result.content)
+        self.assertEqual(preserved, "rewritten externally\n")
+
+    def test_replace_requires_expected_sha256(self) -> None:
+        with test_directory() as workspace:
+            (workspace / "example.py").write_text("value = 1\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute(
+                "replace_in_file",
+                {
+                    "path": "example.py",
+                    "old_text": "value = 1",
+                    "new_text": "value = 2",
+                },
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertIn("expected_sha256", result.content)
+
+    def test_replace_rejects_malformed_sha256(self) -> None:
+        with test_directory() as workspace:
+            (workspace / "example.py").write_text("value = 1\n", encoding="utf-8")
+            registry = ToolRegistry(workspace)
+
+            result = registry.execute(
+                "replace_in_file",
+                {
+                    "path": "example.py",
+                    "old_text": "value = 1",
+                    "new_text": "value = 2",
+                    "expected_sha256": "nothex",
+                },
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertIn("64-character", result.content)
+
     def test_write_file_creates_new_file_but_never_overwrites(self) -> None:
         with test_directory() as workspace:
             registry = ToolRegistry(workspace)
