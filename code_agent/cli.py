@@ -17,6 +17,7 @@ from .ui import TerminalUI
 class AgentBackend(Protocol):
     mode: str
     model: str
+    sandbox: str
     context_limit: int
     used_tokens: int
 
@@ -51,6 +52,7 @@ class Application:
                 "workspace": str(self.workspace),
                 "mode": self.agent.mode,
                 "model": self.agent.model,
+                "sandbox": self.agent.sandbox,
                 "context_limit": self.agent.context_limit,
             },
         )
@@ -60,6 +62,7 @@ class Application:
             self.log.session_id,
             self.agent.mode,
             self.agent.model,
+            self.agent.sandbox,
         )
 
     def run_turn(self, user_text: str) -> None:
@@ -92,6 +95,7 @@ class Application:
             self.log.event_count,
             self.agent.used_tokens,
             self.agent.context_limit,
+            self.agent.sandbox,
         )
 
     def _publish(self, event: AgentEvent, *, render: bool = True) -> None:
@@ -136,9 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    ui = TerminalUI()
     agent: AgentBackend | None = None
     if args.live:
+        from .command import CommandRunner
         from .live_agent import LiveAgent
         from .openrouter import (
             OpenRouterConfig,
@@ -150,12 +157,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             config = OpenRouterConfig.from_env()
         except OpenRouterConfigurationError as error:
-            TerminalUI().console.print(f"[red]Configuration error: {error}[/red]")
+            ui.console.print(f"[red]Configuration error: {error}[/red]")
             return 2
+        command_runner = CommandRunner()
         provider = OpenRouterProvider(config)
-        agent = LiveAgent(provider, ToolRegistry(args.workspace))
+        agent = LiveAgent(
+            provider,
+            ToolRegistry(args.workspace, command_runner=command_runner),
+            approval_handler=ui.ask_approval,
+        )
 
-    app = Application(args.workspace, args.session_root, agent=agent)
+    app = Application(args.workspace, args.session_root, ui=ui, agent=agent)
     app.start()
 
     one_shot_prompt = args.prompt

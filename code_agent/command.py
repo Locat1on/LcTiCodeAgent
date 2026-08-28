@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 PYTHON_NAMES = {"python", "python.exe", "python3", "python3.exe"}
@@ -33,54 +33,25 @@ class CommandPolicyError(ValueError):
     pass
 
 
-class CommandRunner:
+class CommandExecutor(Protocol):
+    mode: str
+
     def run(
         self,
         argv: list[str],
         cwd: Path,
         timeout_seconds: int,
-    ) -> dict[str, Any]:
-        normalized = self._validate_and_normalize(argv)
-        started = time.monotonic()
-        try:
-            completed = subprocess.run(
-                normalized,
-                cwd=cwd,
-                env=self._safe_environment(),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_seconds,
-                shell=False,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            return {
-                "argv": normalized,
-                "cwd": str(cwd),
-                "exit_code": None,
-                "timed_out": True,
-                "duration_ms": round((time.monotonic() - started) * 1000),
-                "stdout": self._truncate(self._coerce_output(error.stdout)),
-                "stderr": self._truncate(self._coerce_output(error.stderr)),
-            }
-        except FileNotFoundError as error:
-            raise CommandPolicyError(f"command executable was not found: {argv[0]}") from error
+    ) -> dict[str, Any]: ...
 
-        return {
-            "argv": normalized,
-            "cwd": str(cwd),
-            "exit_code": completed.returncode,
-            "timed_out": False,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-            "stdout": self._truncate(completed.stdout),
-            "stderr": self._truncate(completed.stderr),
-        }
 
+class CommandPolicy:
     @staticmethod
-    def _validate_and_normalize(argv: list[str]) -> list[str]:
+    def normalize(
+        argv: list[str],
+        *,
+        python_executable: str,
+        allow_package_commands: bool = True,
+    ) -> list[str]:
         if not isinstance(argv, list) or not 1 <= len(argv) <= 32:
             raise CommandPolicyError("argv must contain between 1 and 32 arguments")
         if not all(isinstance(item, str) and item for item in argv):
@@ -94,9 +65,11 @@ class CommandRunner:
                 raise CommandPolicyError(
                     "Python commands are limited to -m compileall, pytest, or unittest"
                 )
-            return [sys.executable, *argv[1:]]
+            return [python_executable, *argv[1:]]
         if executable in {"pytest", "pytest.exe"}:
-            return [sys.executable, "-m", "pytest", *argv[1:]]
+            return [python_executable, "-m", "pytest", *argv[1:]]
+        if not allow_package_commands:
+            raise CommandPolicyError("this sandbox image currently supports Python only")
 
         allowed_actions = PACKAGE_COMMANDS.get(executable)
         if allowed_actions is None or len(argv) < 2 or argv[1] not in allowed_actions:
@@ -106,8 +79,62 @@ class CommandRunner:
                 raise CommandPolicyError("package scripts are limited to verification tasks")
         return argv.copy()
 
+
+class CommandRunner:
+    mode = "workspace-policy"
+
+    def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        normalized = CommandPolicy.normalize(
+            argv,
+            python_executable=sys.executable,
+        )
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                normalized,
+                cwd=cwd,
+                env=self.safe_environment(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                shell=False,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            return {
+                "argv": normalized,
+                "cwd": str(cwd),
+                "sandbox": self.mode,
+                "exit_code": None,
+                "timed_out": True,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                "stdout": self.truncate(self.coerce_output(error.stdout)),
+                "stderr": self.truncate(self.coerce_output(error.stderr)),
+            }
+        except FileNotFoundError as error:
+            raise CommandPolicyError(f"command executable was not found: {argv[0]}") from error
+
+        return {
+            "argv": normalized,
+            "cwd": str(cwd),
+            "sandbox": self.mode,
+            "exit_code": completed.returncode,
+            "timed_out": False,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "stdout": self.truncate(completed.stdout),
+            "stderr": self.truncate(completed.stderr),
+        }
+
     @staticmethod
-    def _safe_environment() -> dict[str, str]:
+    def safe_environment() -> dict[str, str]:
         allowed = {
             "LANG",
             "LC_ALL",
@@ -119,19 +146,23 @@ class CommandRunner:
             "VIRTUAL_ENV",
             "WINDIR",
         }
-        environment = {name: value for name, value in os.environ.items() if name.upper() in allowed}
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in allowed
+        }
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHONUTF8"] = "1"
         return environment
 
     @staticmethod
-    def _truncate(text: str, limit: int = 16_000) -> str:
+    def truncate(text: str, limit: int = 16_000) -> str:
         if len(text) <= limit:
             return text
         return text[:limit] + "\n[output truncated at 16000 characters]"
 
     @staticmethod
-    def _coerce_output(value: str | bytes | None) -> str:
+    def coerce_output(value: str | bytes | None) -> str:
         if value is None:
             return ""
         if isinstance(value, bytes):

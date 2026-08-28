@@ -16,6 +16,7 @@ class EventType(StrEnum):
     ASSISTANT_MESSAGE = "assistant.message"
     TOOL_REQUESTED = "tool.requested"
     TOOL_APPROVAL_REQUIRED = "tool.approval_required"
+    TOOL_APPROVAL_DECIDED = "tool.approval_decided"
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
@@ -81,4 +82,3 @@ class AgentEvent:
             timestamp=data["timestamp"],
             payload=data.get("payload", {}),
         )
-

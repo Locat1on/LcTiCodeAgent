@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .events import AgentEvent, EventType
+from .security import ApprovalRequest
 
 
 class TerminalUI:
@@ -23,6 +24,7 @@ class TerminalUI:
         session_id: str,
         mode: str = "simulation",
         model: str = "simulator",
+        sandbox: str = "simulation",
     ) -> None:
         title = Text("LcTiCodeAgent", style="bold cyan")
         body = Text()
@@ -32,6 +34,9 @@ class TerminalUI:
         body.append(session_id)
         body.append("\nModel      ", style="dim")
         body.append(model)
+        body.append("\nSandbox    ", style="dim")
+        sandbox_style = "green" if sandbox == "workspace-policy" else "yellow"
+        body.append(sandbox, style=sandbox_style)
         body.append("\nStage      ", style="dim")
         if mode == "simulation":
             body.append("UI and event protocol simulation", style="yellow")
@@ -60,6 +65,7 @@ class TerminalUI:
         event_count: int,
         used_tokens: int,
         limit_tokens: int,
+        sandbox: str,
     ) -> None:
         ratio = used_tokens / limit_tokens if limit_tokens else 0
         self.console.print(
@@ -69,6 +75,7 @@ class TerminalUI:
                         f"Workspace: {workspace}",
                         f"Session log: {session_path}",
                         f"Events: {event_count}",
+                        f"Sandbox: {sandbox}",
                         f"Context: {used_tokens:,} / {limit_tokens:,} ({ratio:.1%})",
                     )
                 ),
@@ -87,6 +94,7 @@ class TerminalUI:
             EventType.TOOL_COMPLETED: self._render_tool_completed,
             EventType.TOOL_FAILED: self._render_tool_failed,
             EventType.TOOL_APPROVAL_REQUIRED: self._render_approval,
+            EventType.TOOL_APPROVAL_DECIDED: self._render_approval_decided,
             EventType.CONTEXT_USAGE: self._render_context,
             EventType.CONTEXT_CLEARED: self._render_context_cleared,
             EventType.ERROR: self._render_error,
@@ -97,6 +105,15 @@ class TerminalUI:
 
     def prompt(self) -> str:
         return self.console.input("[bold green]You> [/bold green]").strip()
+
+    def ask_approval(self, request: ApprovalRequest) -> bool:
+        try:
+            answer = self.console.input(
+                "[bold yellow]Allow this action once? [y/N] [/bold yellow]"
+            )
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer.strip().lower() in {"y", "yes"}
 
     def _render_user(self, event: AgentEvent) -> None:
         self._close_assistant_stream()
@@ -135,13 +152,28 @@ class TerminalUI:
         )
 
     def _render_approval(self, event: AgentEvent) -> None:
+        arguments = event.payload.get("arguments", {})
         self.console.print(
             Panel(
-                str(event.payload),
+                "\n".join(
+                    (
+                        f"Tool: {event.payload.get('name', 'unknown')}",
+                        f"Risk: {event.payload.get('risk', 'unknown')}",
+                        f"Reason: {event.payload.get('reason', '')}",
+                        f"Arguments: {arguments}",
+                    )
+                ),
                 title="Permission required",
                 border_style="yellow",
             )
         )
+
+    def _render_approval_decided(self, event: AgentEvent) -> None:
+        approved = bool(event.payload.get("approved"))
+        if approved:
+            self.console.print("[green]  ✓ approved once[/green]")
+        else:
+            self.console.print("[red]  ✗ permission denied[/red]")
 
     def _render_context(self, event: AgentEvent) -> None:
         used = event.payload["used_tokens"]

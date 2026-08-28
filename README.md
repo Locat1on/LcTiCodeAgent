@@ -15,6 +15,9 @@
 - `--demo` 非交互演示模式，便于测试和录制
 - OpenRouter 上 `google/gemini-3.7-flash` 的流式 Function Calling
 - 本地读取、精确替换、新建文件和验证命令工具
+- 默认启用的轻量Workspace Policy Sandbox
+- `ALLOW / ASK / DENY` 权限管线和单次CLI审批
+- 受控HTTPS文本获取与Git只读检查工具
 
 ## 运行
 
@@ -44,6 +47,8 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 ```powershell
 .\.venv\Scripts\python.exe -m code_agent --workspace examples\buggy_average --live --prompt "修复 average 对空列表除零的问题，空列表应返回 0.0；不要修改测试，并运行测试验证。"
 ```
+
+Workspace Policy Sandbox无需Docker、WSL或管理员权限。它限制所有文件工具只能访问工作区，拒绝凭据文件和歧义修改；命令采用参数数组并设置白名单、环境变量白名单、超时和输出上限。该模式不提供内核级文件系统或网络隔离，不能替代容器、虚拟机或操作系统Sandbox。
 
 运行测试：
 

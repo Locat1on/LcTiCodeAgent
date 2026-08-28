@@ -13,6 +13,7 @@ class SimulatedAgent:
 
     mode = "simulation"
     model = "simulator"
+    sandbox = "simulation"
     context_limit = 32_000
 
     def __init__(self) -> None:
