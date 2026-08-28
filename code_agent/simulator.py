@@ -100,6 +100,34 @@ class SimulatedAgent:
     def clear_context(self) -> None:
         self.used_tokens = 0
 
+    def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            {
+                "trigger": "manual",
+                "changed": False,
+                "before_tokens": self.used_tokens,
+                "after_tokens": self.used_tokens,
+                "items_pruned": 0,
+                "rules": {},
+                "pruned_event_ids": [],
+            },
+        )
+
+    def context_stats(self) -> dict[str, object]:
+        return {
+            "used_tokens": self.used_tokens,
+            "limit_tokens": self.context_limit,
+            "estimated_tokens": self.used_tokens,
+            "items": 0,
+            "layers": {
+                "pinned": {"items": 0, "estimated_tokens": 0},
+                "recent": {"items": 0, "estimated_tokens": 0},
+                "evidence": {"items": 0, "estimated_tokens": 0},
+            },
+        }
+
     @staticmethod
     def _query_from(user_text: str) -> str:
         compact = " ".join(user_text.split())

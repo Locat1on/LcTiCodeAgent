@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -51,7 +52,8 @@ class TerminalUI:
         for command, description in (
             ("/help", "显示命令帮助"),
             ("/status", "显示工作区、会话和事件数量"),
-            ("/context", "显示当前上下文占用"),
+            ("/context", "显示分层上下文占用"),
+            ("/compact", "立即执行确定性上下文裁剪"),
             ("/clear", "清除模拟上下文，不删除审计日志"),
             ("/exit", "结束会话"),
         ):
@@ -84,6 +86,35 @@ class TerminalUI:
             )
         )
 
+    def show_context_report(self, stats: dict[str, Any]) -> None:
+        used = int(stats.get("used_tokens", 0))
+        limit = int(stats.get("limit_tokens", 0))
+        ratio = used / limit if limit else 0
+        lines = [
+            f"Model usage: {used:,} / {limit:,} ({ratio:.1%})",
+            f"Estimated: {int(stats.get('estimated_tokens', 0)):,} tokens "
+            f"across {int(stats.get('items', 0))} items",
+        ]
+        layers = stats.get("layers", {})
+        for layer_name, label in (
+            ("pinned", "Pinned  "),
+            ("recent", "Recent  "),
+            ("evidence", "Evidence"),
+        ):
+            layer = layers.get(layer_name, {})
+            lines.append(
+                f"{label}: {int(layer.get('items', 0))} items, "
+                f"{int(layer.get('estimated_tokens', 0)):,} tokens"
+            )
+        memory = stats.get("working_memory")
+        if memory:
+            lines.append(
+                f"Working memory: {memory.get('modified_files', 0)} modified files, "
+                f"{memory.get('verified_commands', 0)} verified commands, "
+                f"{memory.get('open_errors', 0)} open errors"
+            )
+        self.console.print(Panel("\n".join(lines), title="Context", border_style="blue"))
+
     def render(self, event: AgentEvent) -> None:
         handlers = {
             EventType.USER_MESSAGE: self._render_user,
@@ -97,6 +128,8 @@ class TerminalUI:
             EventType.TOOL_APPROVAL_DECIDED: self._render_approval_decided,
             EventType.CONTEXT_USAGE: self._render_context,
             EventType.CONTEXT_CLEARED: self._render_context_cleared,
+            EventType.CONTEXT_COMPACTION_STARTED: self._render_compaction_started,
+            EventType.CONTEXT_COMPACTION_COMPLETED: self._render_compaction_completed,
             EventType.ERROR: self._render_error,
         }
         handler = handlers.get(event.event_type)
@@ -187,6 +220,27 @@ class TerminalUI:
 
     def _render_context_cleared(self, event: AgentEvent) -> None:
         self.console.print("[yellow]Context cleared; the audit log was preserved.[/yellow]")
+
+    def _render_compaction_started(self, event: AgentEvent) -> None:
+        estimated = event.payload.get("estimated_tokens", 0)
+        limit = event.payload.get("limit_tokens", 0)
+        self.console.print(
+            f"[yellow]  … compacting context "
+            f"({estimated:,} / {limit:,} estimated tokens)[/yellow]"
+        )
+
+    def _render_compaction_completed(self, event: AgentEvent) -> None:
+        payload = event.payload
+        if not payload.get("changed"):
+            self.console.print("[dim]  context already compact; nothing pruned[/dim]")
+            return
+        before = payload.get("before_tokens", 0)
+        after = payload.get("after_tokens", 0)
+        items = payload.get("items_pruned", 0)
+        self.console.print(
+            f"[green]  ✓ compacted context: {before:,} → {after:,} estimated tokens, "
+            f"{items} tool result(s) pruned[/green]"
+        )
 
     def _render_error(self, event: AgentEvent) -> None:
         self.console.print(f"[red]Error: {event.payload.get('message', 'unknown')}[/red]")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from .events import AgentEvent, EventType
@@ -29,6 +29,10 @@ class AgentBackend(Protocol):
     ) -> Iterator[AgentEvent]: ...
 
     def clear_context(self) -> None: ...
+
+    def compact_context(self, session_id: str) -> Iterator[AgentEvent]: ...
+
+    def context_stats(self) -> dict[str, Any]: ...
 
 
 class Application:
@@ -87,6 +91,13 @@ class Application:
                 {"used_tokens": 0},
             )
         )
+
+    def compact_context(self) -> None:
+        for event in self.agent.compact_context(self.log.session_id):
+            self._publish(event)
+
+    def show_context(self) -> None:
+        self.ui.show_context_report(self.agent.context_stats())
 
     def show_status(self) -> None:
         self.ui.show_status(
@@ -194,8 +205,14 @@ def main(argv: list[str] | None = None) -> int:
         if user_text == "/help":
             app.ui.show_help()
             continue
-        if user_text in {"/status", "/context"}:
+        if user_text == "/status":
             app.show_status()
+            continue
+        if user_text == "/context":
+            app.show_context()
+            continue
+        if user_text == "/compact":
+            app.compact_context()
             continue
         if user_text == "/clear":
             app.clear_context()
