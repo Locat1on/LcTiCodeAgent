@@ -62,5 +62,28 @@ class SessionLogTests(unittest.TestCase):
             empty = SessionLog(directory, session_id="session-empty")
             self.assertIsNone(empty.recall("missing-event"))
 
+    def test_load_reports_corrupt_line_number(self) -> None:
+        with test_directory() as directory:
+            log = SessionLog(directory, session_id="session-1")
+            log.append(
+                AgentEvent.create(EventType.SESSION_STARTED, log.session_id, {})
+            )
+            with log.path.open("a", encoding="utf-8") as stream:
+                stream.write("{not valid json}\n")
+
+            with self.assertRaisesRegex(ValueError, "line 2"):
+                log.load()
+
+    def test_load_skips_blank_lines(self) -> None:
+        with test_directory() as directory:
+            log = SessionLog(directory, session_id="session-1")
+            event = AgentEvent.create(EventType.USER_MESSAGE, log.session_id, {"text": "a"})
+            log.append(event)
+            with log.path.open("a", encoding="utf-8") as stream:
+                stream.write("\n")
+
+            self.assertEqual(log.load(), [event])
+            self.assertEqual(log.event_count, 1)
+
 if __name__ == "__main__":
     unittest.main()
