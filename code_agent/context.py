@@ -226,6 +226,8 @@ class ToolResultPruner:
             return ToolResultPruner.read_file(item, result)
         if tool_name == "list_files":
             return ToolResultPruner.list_files(item, result)
+        if tool_name == "search_text":
+            return ToolResultPruner.search_text(item, result)
         if tool_name == "fetch_url":
             return ToolResultPruner.fetch_url(item, result)
         return ToolResultPruner.generic(result, item)
@@ -296,6 +298,22 @@ class ToolResultPruner:
         if item.source_event_id:
             summary["event_id"] = item.source_event_id
         return json.dumps(summary, ensure_ascii=False), "list_files"
+
+    @staticmethod
+    def search_text(item: ContextItem, result: Any) -> tuple[Any, str] | None:
+        parsed = result if isinstance(result, dict) else loads_if_json(result)
+        if not isinstance(parsed, dict) or "matches" not in parsed:
+            return None
+        summary: dict[str, Any] = {
+            key: parsed[key]
+            for key in ("query", "path", "engine", "files_searched", "returned", "truncated")
+            if key in parsed
+        }
+        summary["match_count"] = len(parsed.get("matches") or [])
+        summary["pruned"] = True
+        if item.source_event_id:
+            summary["event_id"] = item.source_event_id
+        return json.dumps(summary, ensure_ascii=False), "search_text"
 
     @staticmethod
     def fetch_url(item: ContextItem, result: Any) -> tuple[Any, str] | None:

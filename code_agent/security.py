@@ -75,6 +75,11 @@ class PermissionPolicy:
                 PermissionDecision.ALLOW,
                 "read-only workspace inspection",
             ),
+            "search_text": PermissionRule(
+                RiskClass.READ,
+                PermissionDecision.ALLOW,
+                "read-only workspace search",
+            ),
             "replace_in_file": PermissionRule(
                 RiskClass.LOCAL_WRITE,
                 PermissionDecision.ALLOW,

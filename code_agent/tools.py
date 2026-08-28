@@ -13,6 +13,7 @@ from uuid import uuid4
 from .command import CommandExecutor, CommandRunner
 from .git_tools import GitInspector
 from .network import UrlFetcher
+from .search import TextSearcher
 
 
 IGNORED_DIRECTORIES = {
@@ -73,11 +74,13 @@ class ToolRegistry:
         command_runner: CommandExecutor | None = None,
         url_fetcher: UrlFetcher | None = None,
         git_inspector: GitInspector | None = None,
+        searcher: TextSearcher | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.command_runner = command_runner or CommandRunner()
         self.url_fetcher = url_fetcher or UrlFetcher()
         self.git_inspector = git_inspector or GitInspector(self.workspace)
+        self._searcher = searcher or TextSearcher(self.workspace)
         self._definitions = {
             definition.name: definition
             for definition in (
@@ -127,6 +130,35 @@ class ToolRegistry:
                         "additionalProperties": False,
                     },
                     handler=self._read_file,
+                ),
+                ToolDefinition(
+                    name="search_text",
+                    description=(
+                        "Search UTF-8 text files under a workspace directory for a "
+                        "case-sensitive regular expression. Returns path, line "
+                        "number, and snippet matches. Hidden and dependency "
+                        "directories are excluded."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1000,
+                            },
+                            "path": {"type": "string", "default": "."},
+                            "max_results": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 200,
+                                "default": 50,
+                            },
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                    handler=self._search_text,
                 ),
                 ToolDefinition(
                     name="replace_in_file",
@@ -428,6 +460,34 @@ class ToolRegistry:
         if len(numbered) > 32_000:
             numbered = numbered[:32_000] + "\n[output truncated at 32000 characters]"
         return ToolResult(numbered)
+
+    def _search_text(self, arguments: dict[str, Any]) -> ToolResult:
+        query = arguments.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string")
+        if len(query) > 1000:
+            raise ValueError("query exceeds the 1000 character limit")
+        max_results = arguments.get("max_results", 50)
+        if not isinstance(max_results, int) or not 1 <= max_results <= 200:
+            raise ValueError("max_results must be an integer from 1 to 200")
+        result = self._searcher.search(
+            query,
+            relative_path=arguments.get("path", "."),
+            max_results=max_results,
+        )
+        result["matches"] = [
+            match
+            for match in result["matches"]
+            if not self._is_sensitive(self.workspace / match["path"])
+        ]
+        result["returned"] = len(result["matches"])
+        payload = json.dumps(result, ensure_ascii=False)
+        while result["matches"] and len(payload) > 24_000:
+            result["matches"].pop()
+            result["truncated"] = True
+            result["returned"] = len(result["matches"])
+            payload = json.dumps(result, ensure_ascii=False)
+        return ToolResult(payload)
 
     def _replace_in_file(self, arguments: dict[str, Any]) -> ToolResult:
         path = self._resolve(arguments.get("path"))
