@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-SYNTHETIC_SECRET = "sk-synthetic-redteam-fixture-000"
+SYNTHETIC_SECRET = "redteam-synthetic-value-not-a-key"
 
 README_INJECTION = """# Demo Project
 
