@@ -2,7 +2,7 @@
 
 一个从零实现的可对话终端编程智能体。本项目不依赖任何 Agent 框架或 SDK，模型交互、会话历史、上下文管理、工具执行、循环终止与错误处理均由项目自行实现。
 
-当前已建立追加式事件日志、可对话终端 UI、OpenRouter 流式 Function Calling、本地文件与受限命令工具、工作区文本搜索、Workspace Policy Sandbox 权限管线、任务感知的确定性上下文压缩（第一层：工具结果裁剪，证据可经会话日志恢复）、从会话日志确定性恢复模型上下文的会话恢复，以及覆盖注入、伪造证据与命令变体的安全红队回归套件。
+当前已建立追加式事件日志、可对话终端 UI、OpenRouter 流式 Function Calling、本地文件与受限命令工具、工作区文本搜索、Workspace Policy Sandbox 权限管线、两级上下文压缩（确定性工具裁剪 + 经本地事实校验的结构化 LLM 摘要）、从会话日志确定性恢复模型上下文的会话恢复，以及覆盖注入、伪造证据与命令变体的安全红队回归套件。
 
 ## 当前功能
 
@@ -11,7 +11,8 @@
 - 显示工具调用、成功、失败和审批状态
 - 显示上下文 token 使用量
 - 将全部事件持久化为 JSONL
-- 分层上下文管理：确定性工具结果裁剪、60% 预算自动压缩、`/compact` 手动压缩、`/context` 分层统计
+- 分层上下文管理：60% 确定性工具裁剪；75% 触发固定 Schema 的结构化摘要并以 50% 为软目标；摘要的路径、标识符、数字、exit code 和事件 ID 均在本地校验
+- `/recall EVENT_ID` 从追加式 JSONL 取回被摘要的原始证据；`/compact` 手动压缩；`/context` 分层统计
 - 会话恢复：`--resume <SESSION_ID>` 从 JSONL 日志确定性重建模型上下文、工作记忆和 token 用量
 - `/help`、`/status`、`/context`、`/compact`、`/clear`、`/exit` 命令
 - `--demo` 非交互演示模式，便于测试和录制
@@ -47,6 +48,8 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 
 默认模型为固定版本 `google/gemini-3.7-flash`。模型只能请求工具；文件读取和执行均由本项目在本地完成。项目不使用 OpenRouter Agent SDK、Server Tools 或任何托管代码执行能力。
 
+模型循环默认最多 16 步，可通过 `LCTI_MAX_STEPS` 在 4–64 之间调整。结构化摘要复用同一模型，请求中携带固定 JSON Schema，并由本地验证器严格执行；摘要失败或事实校验不通过时，Agent 保留原上下文继续运行。
+
 运行内置修复任务：
 
 ```powershell
@@ -67,6 +70,12 @@ Workspace Policy Sandbox无需Docker、WSL或管理员权限。它限制所有�
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+运行四种压缩策略的确定性指标夹具：
+
+```powershell
+.\.venv\Scripts\python.exe -m experiments.context_compaction
 ```
 
 API key 仅通过环境变量读取，不会写入仓库、日志或视频。

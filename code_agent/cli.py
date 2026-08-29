@@ -158,6 +158,11 @@ class Application:
     def show_context(self) -> None:
         self.ui.show_context_report(self.agent.context_stats())
 
+    def recall_event(self, event_id: str) -> AgentEvent | None:
+        event = self.log.recall(event_id)
+        self.ui.show_recalled_event(event, event_id)
+        return event
+
     def show_status(self) -> None:
         self.ui.show_status(
             self.workspace,
@@ -294,6 +299,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if user_text == "/compact":
             app.compact_context()
+            continue
+        if user_text.startswith("/recall "):
+            event_id = user_text.removeprefix("/recall ").strip()
+            if not event_id:
+                app.ui.console.print("[yellow]Usage: /recall EVENT_ID[/yellow]")
+            else:
+                app.recall_event(event_id)
             continue
         if user_text == "/clear":
             app.clear_context()

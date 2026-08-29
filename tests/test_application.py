@@ -122,6 +122,24 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn("Recent", rendered)
         self.assertIn("Evidence", rendered)
 
+    def test_recall_event_displays_original_log_event(self) -> None:
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=100)
+        with test_directory() as directory:
+            app = Application(Path.cwd(), directory, TerminalUI(console))
+            app.start()
+            event = AgentEvent.create(
+                EventType.TOOL_COMPLETED,
+                app.log.session_id,
+                {"name": "read_file", "content": "original evidence"},
+            )
+            app.log.append(event)
+
+            recalled = app.recall_event(event.event_id)
+
+        self.assertEqual(recalled, event)
+        self.assertIn("original evidence", output.getvalue())
+
     def test_resume_replays_log_and_continues_same_session(self) -> None:
         first_output = io.StringIO()
         resume_output = io.StringIO()

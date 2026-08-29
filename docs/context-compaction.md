@@ -1,4 +1,4 @@
-# 确定性上下文压缩（第一层）
+# 两级、可追溯的上下文压缩
 
 ## 定位
 
@@ -6,7 +6,7 @@
 
 > Task-aware, evidence-preserving context compaction for coding agents.
 
-当前实现的是第一层：**确定性工具结果裁剪**。它不调用模型做摘要，不删除任何消息，只把旧的大块工具结果原地改写为保留证据指针的摘要。压缩触发、裁剪规则和产物全部确定、可测试、可复现。
+实现分为两级：第一层是**确定性工具结果裁剪**，第二层是**经本地事实校验的结构化 LLM 摘要**。第一层不调用模型，只原地改写旧工具结果；第二层在上下文继续增长时，用固定 JSON Schema 汇总完整旧轮次。两层都保留原事件 ID，原始 JSONL 永不改写。
 
 ## 分层
 
@@ -18,7 +18,7 @@
 | Recent | 最后一条用户消息之后的所有条目 | 永不压缩 |
 | Evidence | 更早轮次的条目 | 工具结果按规则改写 |
 
-规划中的四层上下文（Pinned / Structured Working Memory / Recent Raw / Recoverable Evidence）中，结构化工作记忆目前由 `WorkingMemory` 在压缩时确定性收集（修改过的文件与哈希、已验证命令与退出码、未解决错误），但尚未注入提示词；摘要压缩留待后续阶段。
+逻辑上的四层为 Pinned、Structured Working Memory、Recent Raw 和 Recoverable Evidence。`WorkingMemory` 确定性收集修改文件与哈希、已验证命令与退出码、未解决错误；结构化摘要作为 Pinned 消息注入，Recent Raw 不参与压缩，旧证据可由事件 ID 从日志取回。
 
 ## Token 估算
 
@@ -26,9 +26,23 @@
 
 ## 触发
 
-- 自动：每个模型步骤开始前，估算 token 超过预算 60% 时执行压缩，产生 `context.compaction_started` 与 `context.compaction_completed` 事件；未超过则不产生任何事件。
-- 手动：`/compact` 立即执行一次压缩，无论是否达到阈值。
+- 自动第一层：每个模型步骤开始前，估算 token 超过预算 60% 时执行确定性裁剪。
+- 自动第二层：进入该步骤前超过 75%，且第一层后仍高于 50%，调用同一 OpenRouter 模型生成结构化摘要，目标压回 50%。若 Recent Raw 本身已超过 50%，事件会如实记录 `target_met=false`。
+- 手动：`/compact` 先执行第一层；若仍高于 50%，再尝试第二层。
 - 预算来自 `LCTI_CONTEXT_BUDGET`（默认 32000）。
+
+## 结构化摘要与事实校验
+
+`code_agent/summary.py` 提供固定的 `SUMMARY_SCHEMA`，只接受以下字段：目标、已完成事项、决策、文件与标识符、命令与退出码、未解决错误、下一步，以及对应事件 ID。OpenRouter 请求把完整 Schema 与旧上下文一同发送，使用 `json_object` 保证 JSON 语法、温度为 0；提供商返回后由本地校验器严格执行字段、长度和事实约束。因此安全边界不依赖上游是否实现某个 `strict` 方言。
+
+模型返回后先在本地检查：
+
+- 顶层和每类条目的字段必须与固定 JSON Schema 完全一致，额外字段被拒绝；
+- 路径、代码标识符、命令参数、数字和 exit code 必须逐项出现在被摘要的原消息中；
+- 每个 `event_id` 必须属于本次被摘要的工具结果；
+- 只有校验通过才原子替换旧完整轮次；失败时保留原上下文，并在压缩事件中记录 `validation=rejected`。
+
+结构化摘要事件含摘要本身，因此 `--resume` 会重新执行相同本地校验并重建压缩后的上下文；被篡改的会话日志不会静默进入模型上下文。
 
 ## 裁剪规则
 
@@ -50,21 +64,26 @@
 
 ## 证据恢复
 
-每个裁剪摘要内嵌原 `tool.completed` 事件的 `event_id`。会话 JSONL 永不改写，`SessionLog.recall(event_id)` 可取回完整原始结果。`tool.completed` 事件负载本身带有完整工具输出，因此恢复不依赖内存状态。
+每个裁剪或结构化摘要都保存原 `tool.completed` / `tool.failed` 事件的 `event_id`。会话 JSONL 永不改写，`SessionLog.recall(event_id)` 或终端命令 `/recall EVENT_ID` 可取回完整原始结果。`tool.completed` 事件负载本身带有完整工具输出，因此恢复不依赖内存状态。
 
 ## 不变量
 
-- 永不删除或重排消息：assistant 的每个 `tool_calls` 始终有配对的 `tool` 消息，裁剪后模型请求依然合法。
+- 第一层永不删除或重排消息。第二层只原子替换最后一条用户消息之前的完整旧轮次，不会留下失配的 assistant/tool 消息。
 - 投影逐字节稳定：`ContextManager.messages()` 输出与原实现的 OpenAI chat 格式一致，每次调用重建新字典，外部无法通过旧引用污染内部状态。
 - 压缩事件本身也进入审计日志，报告含前后估算、按规则计数和被裁剪事件 ID。
 
 ## 命令
 
 - `/context`：显示模型上报用量、估算用量、各层条目与 token 数、工作记忆统计。
-- `/compact`：立即执行确定性裁剪。
+- `/compact`：立即执行第一层；若仍超过 50% 则继续结构化摘要。
+- `/recall EVENT_ID`：从追加式会话日志显示某个原始事件。
+
+## 对比实验
+
+运行 `python -m experiments.context_compaction`，可在同一确定性夹具上比较 `no_compression`、`drop_oldest`、`plain_summary` 和 `validated_structured_summary`。统一采集估算 token、压缩率、关键事实召回率、事件 ID 召回率、工具消息配对有效性和校验状态。该夹具用于验证机制与指标管线，不冒充真实模型质量基准；后续可用真实任务日志扩充样本。
 
 ## 已知局限
 
 - Token 估算是启发式，非精确分词。
-- 第一层只改写不删除；压缩率受限于工具结果占比。
-- 尚无模型驱动的结构化摘要、固定 JSON Schema 校验和从日志恢复会话。
+- 事实校验保证受保护字段来自原事件，但不能证明自由文本语义等价；因此提示词要求“不确定则省略”，并保留事件级回溯。
+- 目标 50% 是软目标：当前轮次受到保护，若其自身过大则不会为了达标而破坏 Recent Raw。

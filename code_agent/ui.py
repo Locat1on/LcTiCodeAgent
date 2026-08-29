@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,8 @@ class TerminalUI:
             ("/help", "显示命令帮助"),
             ("/status", "显示工作区、会话和事件数量"),
             ("/context", "显示分层上下文占用"),
-            ("/compact", "立即执行确定性上下文裁剪"),
+            ("/compact", "立即执行两级上下文压缩"),
+            ("/recall EVENT_ID", "从追加式日志取回被压缩的原始事件"),
             ("/clear", "清除模拟上下文，不删除审计日志"),
             ("/exit", "结束会话"),
         ):
@@ -114,6 +116,15 @@ class TerminalUI:
                 f"{memory.get('open_errors', 0)} open errors"
             )
         self.console.print(Panel("\n".join(lines), title="Context", border_style="blue"))
+
+    def show_recalled_event(self, event: AgentEvent | None, event_id: str) -> None:
+        if event is None:
+            self.console.print(f"[yellow]Event not found: {event_id}[/yellow]")
+            return
+        body = json.dumps(event.to_dict(), ensure_ascii=False, indent=2)
+        self.console.print(
+            Panel(body, title=f"Recalled {event.event_type.value}", border_style="blue")
+        )
 
     def render(self, event: AgentEvent) -> None:
         handlers = {
@@ -250,9 +261,15 @@ class TerminalUI:
         before = payload.get("before_tokens", 0)
         after = payload.get("after_tokens", 0)
         items = payload.get("items_pruned", 0)
+        strategy = payload.get("strategy", "deterministic_tool_pruning")
+        label = (
+            "context items summarized"
+            if strategy == "validated_structured_summary"
+            else "tool result(s) pruned"
+        )
         self.console.print(
             f"[green]  ✓ compacted context: {before:,} → {after:,} estimated tokens, "
-            f"{items} tool result(s) pruned[/green]"
+            f"{items} {label}[/green]"
         )
 
     def _render_error(self, event: AgentEvent) -> None:
