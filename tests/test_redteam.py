@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from code_agent.command import CommandPolicy, CommandPolicyError
 from code_agent.events import EventType
+from code_agent.git_tools import GitInspector
 from code_agent.live_agent import LiveAgent
 from code_agent.model import (
     ModelEvent,
@@ -81,6 +82,17 @@ class _CountingApproval:
     def __call__(self, request) -> bool:
         self.calls += 1
         return self.approved
+
+
+class _PushCapturingRunner:
+    def __init__(self) -> None:
+        self.push_argv: list[str] | None = None
+
+    def __call__(self, argv, **kwargs):
+        if len(argv) > 1 and argv[1] == "push":
+            self.push_argv = argv
+            return subprocess.CompletedProcess(argv, 0, stdout="simulated\n", stderr="")
+        return subprocess.run(argv, **kwargs)
 
 
 def _event_payloads(events, event_type: EventType):
@@ -329,7 +341,6 @@ class ApprovalStateTests(unittest.TestCase):
             workspace = root / "repo"
             remote = root / "remote.git"
             workspace.mkdir()
-            self._git(root, "init", "-q", "--bare", str(remote.resolve()))
             self._git(workspace, "init", "-q", "-b", "main")
             self._git(workspace, "config", "user.name", "Test User")
             self._git(workspace, "config", "user.email", "test@example.com")
@@ -358,21 +369,25 @@ class ApprovalStateTests(unittest.TestCase):
             provider = _AttackProvider(
                 [[_call("p-1", "git_push", {"remote": "origin", "branch": "main"})]]
             )
+            process_runner = _PushCapturingRunner()
             agent = LiveAgent(
                 provider,
-                ToolRegistry(workspace),
+                ToolRegistry(
+                    workspace,
+                    git_inspector=GitInspector(
+                        workspace,
+                        process_runner=process_runner,
+                    ),
+                ),
                 approval_handler=commit_during_approval,
             )
 
             events = list(agent.respond("Push it", "session-1", "turn-1"))
-            remote_heads = self._git_output(
-                workspace, "ls-remote", "origin", "refs/heads/main"
-            )
 
         failed = _event_payloads(events, EventType.TOOL_FAILED)
         self.assertEqual(len(failed), 1)
         self.assertIn("state changed", failed[0]["error"])
-        self.assertEqual(remote_heads.strip(), "")
+        self.assertIsNone(process_runner.push_argv)
 
     def test_repeated_call_re_requests_approval(self) -> None:
         with test_directory() as workspace:
