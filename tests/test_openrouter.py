@@ -3,11 +3,14 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from openai import OpenAIError
+
 from code_agent.model import ModelEventType
 from code_agent.openrouter import (
     OpenRouterConfig,
     OpenRouterConfigurationError,
     OpenRouterProvider,
+    OpenRouterRequestError,
 )
 
 
@@ -25,6 +28,33 @@ class _FakeClient:
     def __init__(self, chunks: list[SimpleNamespace]) -> None:
         self.completions = _FakeCompletions(chunks)
         self.chat = SimpleNamespace(completions=self.completions)
+
+
+class _SequenceCompletions:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict[str, object]] = []
+
+    def create(self, **kwargs: object) -> object:
+        self.requests.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _request_error(status_code: int | None) -> OpenAIError:
+    error = OpenAIError("synthetic request failure")
+    error.status_code = status_code
+    return error
+
+
+def _stream_then_error(
+    chunks: list[SimpleNamespace],
+    error: OpenAIError,
+):
+    yield from chunks
+    raise error
 
 
 class _SummaryCompletions:
@@ -64,6 +94,7 @@ class OpenRouterConfigTests(unittest.TestCase):
         self.assertEqual(config.model, "google/gemini-3.7-flash")
         self.assertEqual(config.context_budget, 32_000)
         self.assertEqual(config.max_steps, 16)
+        self.assertEqual(config.max_retries, 2)
         self.assertNotIn("secret", repr(config))
 
     def test_missing_api_key_is_rejected(self) -> None:
@@ -78,6 +109,17 @@ class OpenRouterConfigTests(unittest.TestCase):
                         {
                             "OPENROUTER_API_KEY": "secret",
                             "LCTI_MAX_STEPS": value,
+                        }
+                    )
+
+    def test_openrouter_retries_are_bounded(self) -> None:
+        for value in ("not-an-integer", "-1", "6"):
+            with self.subTest(value=value):
+                with self.assertRaises(OpenRouterConfigurationError):
+                    OpenRouterConfig.from_env(
+                        {
+                            "OPENROUTER_API_KEY": "secret",
+                            "LCTI_OPENROUTER_RETRIES": value,
                         }
                     )
 
@@ -140,6 +182,150 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(usage.total_tokens, 120)
         self.assertEqual(events[-1].finish_reason, "tool_calls")
         self.assertEqual(client.completions.request["stream"], True)
+
+    def test_retries_retryable_request_before_any_output(self) -> None:
+        completions = _SequenceCompletions(
+            [
+                _request_error(429),
+                [_chunk(text="Recovered."), _chunk(finish_reason="stop")],
+            ]
+        )
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=2),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        events = list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 2)
+        self.assertEqual(sleeps, [0.5])
+        self.assertEqual(events[0].text, "Recovered.")
+        self.assertEqual(events[-1].finish_reason, "stop")
+
+    def test_does_not_retry_non_retryable_request(self) -> None:
+        completions = _SequenceCompletions([_request_error(400)])
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=2),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        with self.assertRaisesRegex(OpenRouterRequestError, "HTTP 400"):
+            list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_retry_budget_is_finite_and_error_is_sanitized(self) -> None:
+        completions = _SequenceCompletions(
+            [_request_error(503), _request_error(503), _request_error(503)]
+        )
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=2),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        with self.assertRaises(OpenRouterRequestError) as raised:
+            list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 3)
+        self.assertEqual(sleeps, [0.5, 1.0])
+        self.assertIn("HTTP 503", str(raised.exception))
+        self.assertNotIn("synthetic request failure", str(raised.exception))
+
+    def test_does_not_retry_after_partial_text_was_emitted(self) -> None:
+        completions = _SequenceCompletions(
+            [
+                _stream_then_error(
+                    [_chunk(text="partial")],
+                    _request_error(429),
+                ),
+                [_chunk(text="duplicate"), _chunk(finish_reason="stop")],
+            ]
+        )
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=2),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        with self.assertRaisesRegex(OpenRouterRequestError, "HTTP 429"):
+            list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_finish_reason_error_is_explicit_and_empty_attempt_retries(self) -> None:
+        completions = _SequenceCompletions(
+            [
+                [_chunk(finish_reason="error")],
+                [_chunk(text="Recovered."), _chunk(finish_reason="stop")],
+            ]
+        )
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=1),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        events = list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 2)
+        self.assertEqual(sleeps, [0.5])
+        self.assertEqual(events[0].text, "Recovered.")
+
+    def test_finish_reason_error_after_output_is_not_retried(self) -> None:
+        completions = _SequenceCompletions(
+            [[_chunk(text="partial"), _chunk(finish_reason="error")]]
+        )
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=2),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=lambda seconds: None,
+        )
+
+        with self.assertRaisesRegex(OpenRouterRequestError, "finish_reason=error"):
+            list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        self.assertEqual(len(completions.requests), 1)
+
+    def test_summary_request_retries_before_parsing(self) -> None:
+        content = (
+            '{"version":1,"objective":"continue","completed":[],'
+            '"decisions":[],"files":[],"identifiers":[],"commands":[],'
+            '"exit_codes":[],"open_errors":[],"next_actions":[],'
+            '"event_ids":[]}'
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=content),
+                )
+            ]
+        )
+        completions = _SequenceCompletions([_request_error(503), response])
+        sleeps: list[float] = []
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", max_retries=1),
+            client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+            sleep_fn=sleeps.append,
+        )
+
+        summary = provider.summarize_context(
+            [{"role": "user", "content": "continue"}]
+        )
+
+        self.assertEqual(summary["version"], 1)
+        self.assertEqual(len(completions.requests), 2)
+        self.assertEqual(sleeps, [0.5])
 
     def test_summary_sends_fixed_schema_and_requires_json_object(self) -> None:
         content = (

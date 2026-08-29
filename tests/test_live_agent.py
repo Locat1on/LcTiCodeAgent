@@ -11,6 +11,7 @@ from code_agent.model import (
     ModelToolCall,
     ModelUsage,
 )
+from code_agent.openrouter import OpenRouterRequestError
 from code_agent.tools import ToolRegistry
 from tests.helpers import test_directory
 
@@ -118,6 +119,18 @@ class _StructuredSummaryProvider:
         }
 
 
+class _FailingProvider:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            context_budget=32_000,
+            model="google/gemini-3.7-flash",
+        )
+
+    def stream(self, messages, tools):
+        raise OpenRouterRequestError("OpenRouter request ended with finish_reason=error")
+        yield
+
+
 def _write_big_file(workspace) -> None:
     lines = "\n".join(
         f"def compute_value_for_item(index={index}):" for index in range(250)
@@ -141,6 +154,18 @@ class LiveAgentTests(unittest.TestCase):
         self.assertEqual(event_types[-1], EventType.TURN_COMPLETED)
         self.assertTrue(any(message["role"] == "tool" for message in second_request))
         self.assertEqual(agent.used_tokens, 220)
+
+    def test_provider_failure_becomes_visible_model_error(self) -> None:
+        with test_directory() as workspace:
+            agent = LiveAgent(_FailingProvider(), ToolRegistry(workspace))
+            events = list(agent.respond("continue", "session-1", "turn-1"))
+
+        errors = [event for event in events if event.event_type is EventType.ERROR]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].payload["kind"], "OpenRouterRequestError")
+        self.assertIn("finish_reason=error", errors[0].payload["message"])
+        self.assertEqual(events[-1].event_type, EventType.TURN_COMPLETED)
+        self.assertEqual(events[-1].payload["reason"], "model_error")
 
     def test_threshold_compaction_prunes_old_evidence_and_keeps_pairing(self) -> None:
         with test_directory() as workspace:

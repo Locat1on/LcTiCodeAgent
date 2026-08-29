@@ -6,6 +6,7 @@
 - 接口：OpenRouter OpenAI-compatible Chat Completions
 - 上下文实验预算：32,000 token
 - 数据策略：请求只路由到 `data_collection=deny` 的上游
+- 失败重试：默认 2 次，可用 `LCTI_OPENROUTER_RETRIES` 配置为 0–5
 
 固定模型 slug，而不使用自动指向最新版本的别名，以便复现实验。
 
@@ -35,6 +36,14 @@ Tool Call 的 ID、名称和 JSON 参数可能分散在多个流式响应块中�
 5. 参数顶层必须是对象。
 
 验证通过后才进入本地 `ToolRegistry`。模型不能直接执行任何函数。
+
+## 错误与重试语义
+
+Provider 将 HTTP 408、409、429、5xx 以及无 HTTP 状态的连接类错误视为暂时故障，采用 0.5 秒起步的有限指数退避。普通模型流和结构化摘要请求共用同一重试预算；OpenAI 客户端内置重试被关闭，避免两层重试叠加后失去上限。
+
+流式请求只有在尚未向上层发出文本或 usage 事件时才能重试。Tool Call 参数片段在流完整结束前不会交给 `LiveAgent`，因此此时重建请求不会重复执行工具。一旦已经显示部分文本或 usage，后续故障立即转为 `OpenRouterRequestError`，不重放内容。
+
+上游返回 `finish_reason="error"` 时不再作为正常结束透传：空响应可在预算内重试；已有部分输出则立即产生可见的 `error` 事件，当前 turn 以 `model_error` 结束。HTTP 400、401、403 等确定性请求或权限错误不重试，错误消息只保留异常类型和 HTTP 状态，不记录上游响应正文。
 
 ## 当前本地工具
 

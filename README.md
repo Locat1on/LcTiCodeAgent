@@ -17,6 +17,7 @@
 - `/help`、`/status`、`/context`、`/compact`、`/clear`、`/exit` 命令
 - `--demo` 非交互演示模式，便于测试和录制
 - OpenRouter 上 `google/gemini-3.7-flash` 的流式 Function Calling
+- OpenRouter 暂时故障有限重试；`finish_reason="error"` 显式转为可见错误，已输出内容绝不自动重放
 - 本地读取、工作区正则文本搜索、精确替换、新建文件和验证命令工具
 - 默认启用的轻量Workspace Policy Sandbox
 - `ALLOW / ASK / DENY` 权限管线和单次CLI审批
@@ -49,6 +50,8 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 默认模型为固定版本 `google/gemini-3.7-flash`。模型只能请求工具；文件读取和执行均由本项目在本地完成。项目不使用 OpenRouter Agent SDK、Server Tools 或任何托管代码执行能力。
 
 模型循环默认最多 16 步，可通过 `LCTI_MAX_STEPS` 在 4–64 之间调整。结构化摘要复用同一模型，请求中携带固定 JSON Schema，并由本地验证器严格执行；摘要失败或事实校验不通过时，Agent 保留原上下文继续运行。
+
+OpenRouter 默认最多重试 2 次，可通过 `LCTI_OPENROUTER_RETRIES` 设置为 0–5。重试仅发生在尚未输出文本或执行工具的请求上。
 
 运行内置修复任务：
 

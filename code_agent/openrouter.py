@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from openai import OpenAI, OpenAIError
 
@@ -21,6 +22,8 @@ from .summary import SUMMARY_SCHEMA, SUMMARY_SYSTEM_PROMPT
 
 DEFAULT_MODEL = "google/gemini-3.7-flash"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+RETRY_BASE_SECONDS = 0.5
+RETRYABLE_STATUS_CODES = {408, 409, 429}
 
 
 class OpenRouterConfigurationError(ValueError):
@@ -28,6 +31,10 @@ class OpenRouterConfigurationError(ValueError):
 
 
 class OpenRouterRequestError(RuntimeError):
+    pass
+
+
+class _ProviderFinishError(RuntimeError):
     pass
 
 
@@ -39,6 +46,7 @@ class OpenRouterConfig:
     context_budget: int = 32_000
     timeout_seconds: float = 60.0
     max_steps: int = 16
+    max_retries: int = 2
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> OpenRouterConfig:
@@ -72,12 +80,23 @@ class OpenRouterConfig:
             raise OpenRouterConfigurationError(
                 "LCTI_MAX_STEPS must be between 4 and 64"
             )
+        try:
+            max_retries = int(values.get("LCTI_OPENROUTER_RETRIES", "2"))
+        except ValueError as error:
+            raise OpenRouterConfigurationError(
+                "LCTI_OPENROUTER_RETRIES must be an integer"
+            ) from error
+        if not 0 <= max_retries <= 5:
+            raise OpenRouterConfigurationError(
+                "LCTI_OPENROUTER_RETRIES must be between 0 and 5"
+            )
         return cls(
             api_key=api_key,
             model=model,
             base_url=base_url.rstrip("/"),
             context_budget=context_budget,
             max_steps=max_steps,
+            max_retries=max_retries,
         )
 
 
@@ -87,12 +106,15 @@ class OpenRouterProvider:
         config: OpenRouterConfig,
         *,
         client: Any | None = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config
+        self._sleep = sleep_fn
         self._client = client or OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
             timeout=config.timeout_seconds,
+            max_retries=0,
         )
 
     def stream(
@@ -100,62 +122,73 @@ class OpenRouterProvider:
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
     ) -> Iterator[ModelEvent]:
-        accumulator = ToolCallAccumulator()
-        finish_reason: str | None = None
-        try:
-            stream = self._client.chat.completions.create(
-                model=self.config.model,
-                messages=list(messages),
-                tools=list(tools),
-                tool_choice="auto",
-                temperature=0.2,
-                stream=True,
-                stream_options={"include_usage": True},
-                extra_body={
-                    "provider": {
-                        "require_parameters": True,
-                        "data_collection": "deny",
-                    }
-                },
-            )
-            for chunk in stream:
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    yield ModelEvent(
-                        ModelEventType.USAGE,
-                        usage=ModelUsage(
-                            prompt_tokens=usage.prompt_tokens,
-                            completion_tokens=usage.completion_tokens,
-                            total_tokens=usage.total_tokens,
-                        ),
-                    )
-                for choice in chunk.choices:
-                    delta = choice.delta
-                    if delta.content:
-                        yield ModelEvent(ModelEventType.TEXT_DELTA, text=delta.content)
-                    for tool_call in delta.tool_calls or []:
-                        function = tool_call.function
-                        accumulator.add(
-                            tool_call.index,
-                            call_id=tool_call.id,
-                            name_fragment=function.name if function else None,
-                            arguments_fragment=function.arguments if function else None,
+        for attempt in range(self.config.max_retries + 1):
+            accumulator = ToolCallAccumulator()
+            finish_reason: str | None = None
+            output_emitted = False
+            try:
+                stream = self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=list(messages),
+                    tools=list(tools),
+                    tool_choice="auto",
+                    temperature=0.2,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    extra_body={
+                        "provider": {
+                            "require_parameters": True,
+                            "data_collection": "deny",
+                        }
+                    },
+                )
+                for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        output_emitted = True
+                        yield ModelEvent(
+                            ModelEventType.USAGE,
+                            usage=ModelUsage(
+                                prompt_tokens=usage.prompt_tokens,
+                                completion_tokens=usage.completion_tokens,
+                                total_tokens=usage.total_tokens,
+                            ),
                         )
-                    if choice.finish_reason:
-                        finish_reason = choice.finish_reason
-        except OpenAIError as error:
-            status = getattr(error, "status_code", None)
-            suffix = f" (HTTP {status})" if status else ""
-            raise OpenRouterRequestError(
-                f"OpenRouter request failed: {type(error).__name__}{suffix}"
-            ) from error
+                    for choice in chunk.choices:
+                        delta = choice.delta
+                        if delta.content:
+                            output_emitted = True
+                            yield ModelEvent(
+                                ModelEventType.TEXT_DELTA,
+                                text=delta.content,
+                            )
+                        for tool_call in delta.tool_calls or []:
+                            function = tool_call.function
+                            accumulator.add(
+                                tool_call.index,
+                                call_id=tool_call.id,
+                                name_fragment=function.name if function else None,
+                                arguments_fragment=(
+                                    function.arguments if function else None
+                                ),
+                            )
+                        if choice.finish_reason:
+                            finish_reason = choice.finish_reason
+                if finish_reason == "error":
+                    raise _ProviderFinishError("finish_reason=error")
+            except (OpenAIError, _ProviderFinishError) as error:
+                if self._should_retry(error, attempt, output_emitted):
+                    self._sleep(RETRY_BASE_SECONDS * (2**attempt))
+                    continue
+                raise self._normalized_error("request", error) from error
 
-        for tool_call in accumulator.finish():
-            yield ModelEvent(ModelEventType.TOOL_CALL, tool_call=tool_call)
-        yield ModelEvent(
-            ModelEventType.COMPLETED,
-            finish_reason=finish_reason or "stop",
-        )
+            for tool_call in accumulator.finish():
+                yield ModelEvent(ModelEventType.TOOL_CALL, tool_call=tool_call)
+            yield ModelEvent(
+                ModelEventType.COMPLETED,
+                finish_reason=finish_reason or "stop",
+            )
+            return
 
     def summarize_context(
         self,
@@ -163,39 +196,44 @@ class OpenRouterProvider:
     ) -> dict[str, Any]:
         """Request one non-streaming JSON summary for strict local validation."""
 
-        try:
-            response = self._client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "required_schema": SUMMARY_SCHEMA,
-                                "source_messages": list(messages),
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
+        response = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "required_schema": SUMMARY_SCHEMA,
+                                    "source_messages": list(messages),
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                    stream=False,
+                    extra_body={
+                        "provider": {
+                            "require_parameters": True,
+                            "data_collection": "deny",
+                        }
                     },
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-                stream=False,
-                extra_body={
-                    "provider": {
-                        "require_parameters": True,
-                        "data_collection": "deny",
-                    }
-                },
-            )
-        except OpenAIError as error:
-            status = getattr(error, "status_code", None)
-            suffix = f" (HTTP {status})" if status else ""
-            raise OpenRouterRequestError(
-                f"OpenRouter summary request failed: {type(error).__name__}{suffix}"
-            ) from error
+                )
+                choice = response.choices[0]
+                if getattr(choice, "finish_reason", None) == "error":
+                    raise _ProviderFinishError("finish_reason=error")
+                break
+            except (OpenAIError, _ProviderFinishError) as error:
+                if self._should_retry(error, attempt, output_emitted=False):
+                    self._sleep(RETRY_BASE_SECONDS * (2**attempt))
+                    continue
+                raise self._normalized_error("summary request", error) from error
         try:
             parsed = json.loads(response.choices[0].message.content)
         except (AttributeError, IndexError, TypeError, ValueError) as error:
@@ -205,3 +243,36 @@ class OpenRouterProvider:
         if not isinstance(parsed, dict):
             raise OpenRouterRequestError("OpenRouter summary response was not an object")
         return parsed
+
+    def _should_retry(
+        self,
+        error: OpenAIError | _ProviderFinishError,
+        attempt: int,
+        output_emitted: bool,
+    ) -> bool:
+        if output_emitted or attempt >= self.config.max_retries:
+            return False
+        if isinstance(error, _ProviderFinishError):
+            return True
+        status = getattr(error, "status_code", None)
+        return (
+            status is None
+            or status in RETRYABLE_STATUS_CODES
+            or isinstance(status, int)
+            and status >= 500
+        )
+
+    @staticmethod
+    def _normalized_error(
+        operation: str,
+        error: OpenAIError | _ProviderFinishError,
+    ) -> OpenRouterRequestError:
+        if isinstance(error, _ProviderFinishError):
+            return OpenRouterRequestError(
+                f"OpenRouter {operation} ended with finish_reason=error"
+            )
+        status = getattr(error, "status_code", None)
+        suffix = f" (HTTP {status})" if status else ""
+        return OpenRouterRequestError(
+            f"OpenRouter {operation} failed: {type(error).__name__}{suffix}"
+        )
