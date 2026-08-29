@@ -8,6 +8,7 @@ from typing import Any
 
 from .context import ContextManager
 from .events import AgentEvent, EventType
+from .summary import SummaryValidationError, validate_summary
 
 
 INTERRUPTED_TOOL_RESULT = (
@@ -117,9 +118,18 @@ def project_session(
                 results_seen = set()
             elif event.event_type is EventType.CONTEXT_USAGE:
                 used_tokens = int(event.payload["used_tokens"])
+            elif (
+                event.event_type is EventType.CONTEXT_COMPACTION_COMPLETED
+                and event.payload.get("strategy") == "validated_structured_summary"
+                and event.payload.get("changed") is True
+            ):
+                summary = event.payload["summary"]
+                source_messages, event_ids, _, _ = context.summary_source()
+                validate_summary(summary, source_messages, event_ids)
+                context.apply_structured_summary(summary)
         except RestoreError:
             raise
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, SummaryValidationError, TypeError, ValueError) as error:
             raise RestoreError(
                 f"malformed {event.event_type.value} event "
                 f"at position {index}: {error}"

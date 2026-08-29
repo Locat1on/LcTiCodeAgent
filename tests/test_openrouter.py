@@ -27,6 +27,18 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
+class _SummaryCompletions:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.request: dict[str, object] | None = None
+
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        self.request = kwargs
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+        )
+
+
 def _chunk(
     *,
     text: str | None = None,
@@ -51,11 +63,23 @@ class OpenRouterConfigTests(unittest.TestCase):
 
         self.assertEqual(config.model, "google/gemini-3.7-flash")
         self.assertEqual(config.context_budget, 32_000)
+        self.assertEqual(config.max_steps, 16)
         self.assertNotIn("secret", repr(config))
 
     def test_missing_api_key_is_rejected(self) -> None:
         with self.assertRaisesRegex(OpenRouterConfigurationError, "not set"):
             OpenRouterConfig.from_env({})
+
+    def test_max_steps_is_bounded(self) -> None:
+        for value in ("not-an-integer", "3", "65"):
+            with self.subTest(value=value):
+                with self.assertRaises(OpenRouterConfigurationError):
+                    OpenRouterConfig.from_env(
+                        {
+                            "OPENROUTER_API_KEY": "secret",
+                            "LCTI_MAX_STEPS": value,
+                        }
+                    )
 
 
 class OpenRouterProviderTests(unittest.TestCase):
@@ -117,7 +141,29 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(events[-1].finish_reason, "tool_calls")
         self.assertEqual(client.completions.request["stream"], True)
 
+    def test_summary_sends_fixed_schema_and_requires_json_object(self) -> None:
+        content = (
+            '{"version":1,"objective":"continue","completed":[],'
+            '"decisions":[],"files":[],"identifiers":[],"commands":[],'
+            '"exit_codes":[],"open_errors":[],"next_actions":[],'
+            '"event_ids":[]}'
+        )
+        completions = _SummaryCompletions(content)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        provider = OpenRouterProvider(OpenRouterConfig(api_key="secret"), client=client)
+
+        summary = provider.summarize_context([{"role": "user", "content": "continue"}])
+
+        self.assertEqual(summary["version"], 1)
+        self.assertEqual(
+            completions.request["response_format"],
+            {"type": "json_object"},
+        )
+        request_content = completions.request["messages"][1]["content"]
+        self.assertIn('"required_schema"', request_content)
+        self.assertIn('"additionalProperties":false', request_content)
+        self.assertFalse(completions.request["stream"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

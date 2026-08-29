@@ -89,6 +89,35 @@ class _CompactionProvider:
         yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
 
 
+class _StructuredSummaryProvider:
+    def __init__(self, budget: int) -> None:
+        self.config = SimpleNamespace(
+            context_budget=budget,
+            model="google/gemini-3.7-flash",
+        )
+        self.summary_requests: list[list[dict[str, object]]] = []
+
+    def stream(self, messages, tools):
+        yield ModelEvent(ModelEventType.TEXT_DELTA, text="Done.")
+        yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
+
+    def summarize_context(self, messages):
+        self.summary_requests.append(list(messages))
+        return {
+            "version": 1,
+            "objective": "Keep the previous task context",
+            "completed": [],
+            "decisions": [],
+            "files": [],
+            "identifiers": [],
+            "commands": [],
+            "exit_codes": [],
+            "open_errors": [],
+            "next_actions": [],
+            "event_ids": [],
+        }
+
+
 def _write_big_file(workspace) -> None:
     lines = "\n".join(
         f"def compute_value_for_item(index={index}):" for index in range(250)
@@ -189,6 +218,61 @@ class LiveAgentTests(unittest.TestCase):
         self.assertEqual(completed.payload["trigger"], "manual")
         self.assertTrue(completed.payload["changed"])
         self.assertEqual(completed.payload["rules"], {"read_file": 1})
+
+    def test_structured_summary_triggers_at_75_percent_and_targets_50(self) -> None:
+        with test_directory() as workspace:
+            provider = _StructuredSummaryProvider(budget=4_096)
+            agent = LiveAgent(provider, ToolRegistry(workspace))
+            old_context = "retain task context " * 700
+            list(agent.respond(old_context, "session-1", "turn-1"))
+
+            events = list(agent.respond("continue", "session-1", "turn-2"))
+
+        completed = [
+            event
+            for event in events
+            if event.event_type is EventType.CONTEXT_COMPACTION_COMPLETED
+        ]
+        structured = [
+            event
+            for event in completed
+            if event.payload.get("strategy") == "validated_structured_summary"
+        ]
+        self.assertEqual(len(structured), 1)
+        self.assertEqual(structured[0].payload["validation"], "passed")
+        self.assertTrue(structured[0].payload["target_met"])
+        self.assertLessEqual(agent._context.estimated_tokens, 2_048)
+        self.assertEqual(len(provider.summary_requests), 1)
+
+    def test_structured_summary_rejects_ungrounded_fact_without_rewriting(self) -> None:
+        with test_directory() as workspace:
+            provider = _StructuredSummaryProvider(budget=4_096)
+            agent = LiveAgent(provider, ToolRegistry(workspace))
+            list(agent.respond("old context " * 1_000, "session-1", "turn-1"))
+            provider.summarize_context = lambda messages: {
+                "version": 1,
+                "objective": "Modify invented.py",
+                "completed": [],
+                "decisions": [],
+                "files": [],
+                "identifiers": [],
+                "commands": [],
+                "exit_codes": [],
+                "open_errors": [],
+                "next_actions": [],
+                "event_ids": [],
+            }
+
+            events = list(agent.respond("continue", "session-1", "turn-2"))
+
+        structured = [
+            event
+            for event in events
+            if event.event_type is EventType.CONTEXT_COMPACTION_COMPLETED
+            and event.payload.get("strategy") == "validated_structured_summary"
+        ]
+        self.assertEqual(structured[0].payload["validation"], "rejected")
+        self.assertFalse(structured[0].payload["changed"])
 
 
 if __name__ == "__main__":

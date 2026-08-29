@@ -19,9 +19,13 @@ from .security import (
     deny_approval,
 )
 from .tools import ToolRegistry, ToolResult
+from .summary import SummaryValidationError, validate_summary
 
 
 COMPACTION_TRIGGER_RATIO = 0.6
+SUMMARY_TRIGGER_RATIO = 0.75
+SUMMARY_TARGET_RATIO = 0.5
+DEFAULT_MAX_STEPS = 16
 
 
 SYSTEM_PROMPT = """You are LcTiCodeAgent, a terminal coding assistant.
@@ -49,7 +53,7 @@ class LiveAgent:
         provider: OpenRouterProvider,
         tools: ToolRegistry,
         *,
-        max_steps: int = 8,
+        max_steps: int | None = None,
         permission_policy: PermissionPolicy | None = None,
         approval_handler: ApprovalHandler = deny_approval,
     ) -> None:
@@ -57,13 +61,18 @@ class LiveAgent:
         self.model = provider.config.model
         self.tools = tools
         self.sandbox = tools.command_runner.mode
-        self.max_steps = max_steps
+        configured_steps = getattr(provider.config, "max_steps", DEFAULT_MAX_STEPS)
+        self.max_steps = max_steps if max_steps is not None else configured_steps
+        if not 1 <= self.max_steps <= 64:
+            raise ValueError("max_steps must be between 1 and 64")
         self.permission_policy = permission_policy or PermissionPolicy()
         self.approval_handler = approval_handler
         self.context_limit = provider.config.context_budget
         self.used_tokens = 0
         self._context = ContextManager(SYSTEM_PROMPT)
         self._compaction_threshold = int(self.context_limit * COMPACTION_TRIGGER_RATIO)
+        self._summary_threshold = int(self.context_limit * SUMMARY_TRIGGER_RATIO)
+        self._summary_target = int(self.context_limit * SUMMARY_TARGET_RATIO)
 
     def respond(
         self,
@@ -211,6 +220,13 @@ class LiveAgent:
 
     def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
         yield from self._emit_compaction(session_id, None, None, trigger="manual")
+        if self._context.estimated_tokens > self._summary_target:
+            yield from self._emit_structured_compaction(
+                session_id,
+                None,
+                None,
+                trigger="manual",
+            )
 
     def context_stats(self) -> dict[str, Any]:
         stats = self._context.layer_stats()
@@ -230,7 +246,8 @@ class LiveAgent:
         turn_id: str,
         step_id: str,
     ) -> Iterator[AgentEvent]:
-        if self._context.estimated_tokens <= self._compaction_threshold:
+        before = self._context.estimated_tokens
+        if before <= self._compaction_threshold:
             return
         yield from self._emit_compaction(
             session_id,
@@ -238,6 +255,13 @@ class LiveAgent:
             step_id,
             trigger="threshold",
         )
+        if before > self._summary_threshold and self._context.estimated_tokens > self._summary_target:
+            yield from self._emit_structured_compaction(
+                session_id,
+                turn_id,
+                step_id,
+                trigger="threshold",
+            )
 
     def _emit_compaction(
         self,
@@ -259,10 +283,91 @@ class LiveAgent:
             step_id=step_id,
         )
         report = self._context.prune(trigger=trigger)
+        payload = report.to_payload()
+        payload["strategy"] = "deterministic_tool_pruning"
         yield AgentEvent.create(
             EventType.CONTEXT_COMPACTION_COMPLETED,
             session_id,
-            report.to_payload(),
+            payload,
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+
+    def _emit_structured_compaction(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        step_id: str | None,
+        *,
+        trigger: str,
+    ) -> Iterator[AgentEvent]:
+        summarize = getattr(self.provider, "summarize_context", None)
+        if not callable(summarize):
+            return
+        source_messages, event_ids, source_items, source_tokens = (
+            self._context.summary_source()
+        )
+        if not source_messages:
+            return
+        before = self._context.estimated_tokens
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_STARTED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": "validated_structured_summary",
+                "estimated_tokens": before,
+                "limit_tokens": self.context_limit,
+                "target_tokens": self._summary_target,
+                "source_items": source_items,
+                "source_tokens": source_tokens,
+            },
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+        try:
+            summary = summarize(source_messages)
+            validate_summary(summary, source_messages, event_ids)
+            removed, _, after = self._context.apply_structured_summary(summary)
+        except (OpenRouterRequestError, SummaryValidationError, TypeError, ValueError) as error:
+            yield AgentEvent.create(
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+                session_id,
+                {
+                    "trigger": trigger,
+                    "strategy": "validated_structured_summary",
+                    "changed": False,
+                    "before_tokens": before,
+                    "after_tokens": self._context.estimated_tokens,
+                    "items_pruned": 0,
+                    "rules": {},
+                    "pruned_event_ids": [],
+                    "validation": "rejected",
+                    "error": f"{type(error).__name__}: {str(error)[:300]}",
+                    "target_tokens": self._summary_target,
+                    "target_met": self._context.estimated_tokens <= self._summary_target,
+                },
+                turn_id=turn_id,
+                step_id=step_id,
+            )
+            return
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": "validated_structured_summary",
+                "changed": True,
+                "before_tokens": before,
+                "after_tokens": after,
+                "items_pruned": removed,
+                "rules": {"structured_summary": removed},
+                "pruned_event_ids": list(event_ids),
+                "validation": "passed",
+                "summary": summary,
+                "target_tokens": self._summary_target,
+                "target_met": after <= self._summary_target,
+            },
             turn_id=turn_id,
             step_id=step_id,
         )

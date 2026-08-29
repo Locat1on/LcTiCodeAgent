@@ -603,6 +603,58 @@ class RestoreTests(unittest.TestCase):
             second._context.messages(),
         )
 
+    def test_restore_replays_validated_structured_summary(self) -> None:
+        session_id = "structured-summary-session"
+        summary = {
+            "version": 1,
+            "objective": "continue prior work",
+            "completed": [],
+            "decisions": [],
+            "files": [],
+            "identifiers": [],
+            "commands": [],
+            "exit_codes": [],
+            "open_errors": [],
+            "next_actions": [],
+            "event_ids": [],
+        }
+        events = [
+            AgentEvent.create(EventType.SESSION_STARTED, session_id, {}),
+            AgentEvent.create(EventType.USER_MESSAGE, session_id, {"text": "old work"}),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "done", "tool_calls": None},
+            ),
+            AgentEvent.create(EventType.USER_MESSAGE, session_id, {"text": "continue"}),
+            AgentEvent.create(
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+                session_id,
+                {
+                    "strategy": "validated_structured_summary",
+                    "changed": True,
+                    "summary": summary,
+                },
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "continued", "tool_calls": None},
+            ),
+        ]
+
+        with test_directory() as workspace:
+            agent = LiveAgent(_TextProvider(), ToolRegistry(workspace))
+            agent.restore(events)
+
+        messages = agent._context.messages()
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "system", "user", "assistant"],
+        )
+        self.assertIn("validated context summary", messages[1]["content"])
+        self.assertNotIn("old work", str(messages))
+
 
 if __name__ == "__main__":
     unittest.main()

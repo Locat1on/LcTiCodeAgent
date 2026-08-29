@@ -18,6 +18,7 @@ from uuid import uuid4
 
 PRUNED_PREFIX = "[pruned"
 DUPLICATE_PREFIX = "[duplicate"
+SUMMARY_PREFIX = "[validated context summary]\n"
 MIN_PRUNE_CHARS = 400
 COMMAND_OUTCOME_TOOLS = {"run_command", "git_status", "git_diff", "git_log"}
 KEEP_STDOUT_TAIL = 400
@@ -476,6 +477,53 @@ class ContextManager:
                 rendered.append({"role": item.role, "content": item.content})
         return rendered
 
+    def summary_source(
+        self,
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...], int, int]:
+        """Return older complete turns eligible for second-stage summarization."""
+
+        self._refresh_layers()
+        indices = self._summary_candidate_indices()
+        messages = self.messages()
+        source_messages = [messages[index] for index in indices]
+        event_ids = tuple(
+            item.source_event_id
+            for index, item in enumerate(self._items)
+            if index in indices and item.source_event_id
+        )
+        source_tokens = sum(self._items[index].tokens for index in indices)
+        return source_messages, event_ids, len(indices), source_tokens
+
+    def apply_structured_summary(self, summary: dict[str, Any]) -> tuple[int, int, int]:
+        """Atomically replace eligible older turns with one validated summary."""
+
+        self._refresh_layers()
+        indices = self._summary_candidate_indices()
+        if not indices:
+            return 0, self.estimated_tokens, self.estimated_tokens
+        before = self.estimated_tokens
+        encoded = SUMMARY_PREFIX + json.dumps(
+            summary,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        summary_item = self._build_item(
+            "system",
+            encoded,
+            ContextLayer.PINNED,
+            tool_name="context_summary",
+            pruned=True,
+        )
+        selected = set(indices)
+        retained = [
+            item for index, item in enumerate(self._items) if index not in selected
+        ]
+        retained.insert(1, summary_item)
+        self._items = retained
+        self.refresh_state()
+        return len(indices), before, self.estimated_tokens
+
     @property
     def item_count(self) -> int:
         return len(self._items)
@@ -588,6 +636,17 @@ class ContextManager:
                 layer = ContextLayer.EVIDENCE
             if item.layer is not layer:
                 self._items[index] = replace(item, layer=layer)
+
+    def _summary_candidate_indices(self) -> list[int]:
+        return [
+            index
+            for index, item in enumerate(self._items)
+            if index > 0
+            and (
+                item.layer is ContextLayer.EVIDENCE
+                or item.tool_name == "context_summary"
+            )
+        ]
 
     def _collect_working_memory(self) -> None:
         memory = WorkingMemory()
