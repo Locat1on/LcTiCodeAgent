@@ -19,6 +19,7 @@
 - `--demo` 非交互演示模式，便于测试和录制
 - OpenRouter 上 `google/gemini-3.7-flash` 的流式 Function Calling
 - OpenRouter 暂时故障有限重试；`finish_reason="error"` 显式转为可见错误，已输出内容绝不自动重放
+- Gemini 推理视图：可配置 reasoning effort，流式展示提供商返回的摘要或推理文本；加密块与完整详情仅保存在本地并回传模型
 - 本地读取、工作区正则文本搜索、精确替换、新建文件和验证命令工具
 - 默认启用的轻量Workspace Policy Sandbox
 - `ALLOW / ASK / DENY` 权限管线和单次CLI审批
@@ -68,6 +69,8 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 模型循环默认最多 16 步，可通过 `LCTI_MAX_STEPS` 在 4–64 之间调整。结构化摘要复用同一模型，请求中携带固定 JSON Schema，并由本地验证器严格执行；摘要失败或事实校验不通过时，Agent 保留原上下文继续运行。
 
 OpenRouter 默认最多重试 2 次，可通过 `LCTI_OPENROUTER_RETRIES` 设置为 0–5。重试仅发生在尚未输出文本或执行工具的请求上。
+
+Gemini reasoning effort 默认为 `medium`，可通过 `LCTI_REASONING_EFFORT` 设置为 `minimal`、`low`、`medium` 或 `high`。真实验证中 `low` 只返回签名，而 `medium` 返回了可读 `reasoning.text`；提高等级会增加延迟和输出 token。Web UI 优先展示 `reasoning.summary`；若 OpenRouter 只返回 `reasoning.text`，则以“模型推理（提供商返回）”明确标注。两者都不能等同于完整内部思维链。
 
 运行内置修复任务：
 

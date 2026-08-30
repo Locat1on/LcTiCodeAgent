@@ -108,6 +108,40 @@ class _ApprovalAgent:
         }
 
 
+class _ReasoningAgent(_ApprovalAgent):
+    def respond(self, user_text, session_id, turn_id):
+        yield AgentEvent.create(
+            EventType.ASSISTANT_REASONING_DELTA,
+            session_id,
+            {"text": "先检查约束。", "kind": "summary"},
+            turn_id=turn_id,
+        )
+        yield AgentEvent.create(
+            EventType.ASSISTANT_MESSAGE,
+            session_id,
+            {
+                "text": "完成。",
+                "finish_reason": "stop",
+                "tool_calls": None,
+                "reasoning_summary": "先检查约束。",
+                "reasoning": "raw reasoning",
+                "reasoning_details": [
+                    {
+                        "type": "reasoning.encrypted",
+                        "data": "opaque",
+                    }
+                ],
+            },
+            turn_id=turn_id,
+        )
+        yield AgentEvent.create(
+            EventType.TURN_COMPLETED,
+            session_id,
+            {"reason": "stop"},
+            turn_id=turn_id,
+        )
+
+
 class ApprovalBrokerTests(unittest.TestCase):
     def test_prepared_request_resolves_once(self) -> None:
         broker = ApprovalBroker(timeout_seconds=1)
@@ -152,6 +186,41 @@ class ApprovalBrokerTests(unittest.TestCase):
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_browser_receives_summary_but_not_raw_reasoning_details(self) -> None:
+        with test_directory() as directory:
+            app = create_web_app(
+                directory,
+                directory / "sessions",
+                agent_factory=lambda handler: _ReasoningAgent(handler),
+            )
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({"type": "run", "text": "think"})
+                    received: list[dict] = []
+                    while True:
+                        message = websocket.receive_json()
+                        if message["type"] != "event":
+                            continue
+                        received.append(message["event"])
+                        if message["event"]["event_type"] == EventType.TURN_COMPLETED:
+                            break
+
+        reasoning = next(
+            event
+            for event in received
+            if event["event_type"] == EventType.ASSISTANT_REASONING_DELTA
+        )
+        assistant = next(
+            event
+            for event in received
+            if event["event_type"] == EventType.ASSISTANT_MESSAGE
+        )
+        self.assertEqual(reasoning["payload"]["text"], "先检查约束。")
+        self.assertEqual(assistant["payload"]["reasoning_summary"], "先检查约束。")
+        self.assertNotIn("reasoning", assistant["payload"])
+        self.assertNotIn("reasoning_details", assistant["payload"])
+
     def test_serves_cartoon_ui_and_static_assets(self) -> None:
         with test_directory() as directory:
             app = create_web_app(directory, directory / "sessions")
@@ -164,6 +233,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("LcTiCodeAgent", page.text)
         self.assertIn("工具执行和证据", page.text)
+        self.assertIn("思考摘要", script.text)
         self.assertIn("--paper", css.text)
         self.assertIn("new WebSocket", script.text)
         self.assertEqual(mascot.status_code, 200)

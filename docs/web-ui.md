@@ -63,6 +63,7 @@ Web UI 不提供永久批准、force push 或任意 refspec。
 - CSP 只允许同源静态资源和本机 WebSocket；
 - 响应设置 `nosniff`、`no-referrer` 和 `no-store`；
 - 动态事件内容全部通过 `textContent` 渲染，不插入事件提供的 HTML；
+- 思考区只接收经过分类的 `assistant.reasoning_delta`；WebSocket 会移除原始 `reasoning`、签名、加密块和完整 `reasoning_details`；
 - API key 只由后端环境变量读取，不进入 ready 消息、浏览器状态或会话日志。
 
 浏览器会看到完成任务所需的代码片段、命令输出和 Git Preflight。这是本机产品界面，不应暴露到不可信网络。

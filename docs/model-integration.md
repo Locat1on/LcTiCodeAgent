@@ -7,6 +7,7 @@
 - 上下文实验预算：32,000 token
 - 数据策略：请求只路由到 `data_collection=deny` 的上游
 - 失败重试：默认 2 次，可用 `LCTI_OPENROUTER_RETRIES` 配置为 0–5
+- 推理强度：默认 `medium`，可用 `LCTI_REASONING_EFFORT` 配置为 `minimal / low / medium / high`
 
 固定模型 slug，而不使用自动指向最新版本的别名，以便复现实验。
 
@@ -44,6 +45,19 @@ Provider 将 HTTP 408、409、429、5xx 以及无 HTTP 状态的连接类错误�
 流式请求只有在尚未向上层发出文本或 usage 事件时才能重试。Tool Call 参数片段在流完整结束前不会交给 `LiveAgent`，因此此时重建请求不会重复执行工具。一旦已经显示部分文本或 usage，后续故障立即转为 `OpenRouterRequestError`，不重放内容。
 
 上游返回 `finish_reason="error"` 时不再作为正常结束透传：空响应可在预算内重试；已有部分输出则立即产生可见的 `error` 事件，当前 turn 以 `model_error` 结束。HTTP 400、401、403 等确定性请求或权限错误不重试，错误消息只保留异常类型和 HTTP 状态，不记录上游响应正文。
+
+## Gemini 思考摘要
+
+普通 Chat Completions 请求携带 OpenRouter `reasoning` 配置，且 `exclude=false`。Provider 按流读取 `delta.reasoning_details`：
+
+- `reasoning.summary`：作为 `assistant.reasoning_delta(kind=summary)` 发送 UI；
+- `reasoning.text`：若本轮没有 summary，则作为 `assistant.reasoning_delta(kind=provider_text)` 发送，并明确标注为提供商返回文本；
+- `reasoning.encrypted`：不展示；
+- 所有 detail 按上游顺序完整保存在 `assistant.message`，并在工具结果后的下一次模型请求中原样回传。
+
+工具调用会暂停同一段模型响应。OpenRouter 要求 reasoning detail 序列保持顺序且不得改写，因此 `ContextManager` 将其作为 Assistant 消息的一部分；Session restore 也从 JSONL 重建这些字段。旧轮次被结构化压缩后，对应 reasoning detail 随完整旧消息一起移除，原始日志仍可审计。
+
+WebSocket 对浏览器执行最小披露：浏览器只收到本轮允许显示的摘要或 provider text，不会收到 `reasoning`、签名、加密块或完整 `reasoning_details`。完整详情仅存在本地 JSONL 与后端内存。当前 Gemini 3.7 Flash 的 OpenRouter 路由在真实冒烟中返回 `reasoning.text` 而非 `reasoning.summary`，因此 UI 使用不同标题，避免把它误称为摘要或完整思维链。
 
 ## 当前本地工具
 

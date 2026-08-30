@@ -179,10 +179,15 @@ class WebSession:
             "workspace": str(self.workspace),
             "mode": self.agent.mode,
             "model": self.agent.model,
+            "reasoning_effort": getattr(
+                self.agent,
+                "reasoning_effort",
+                None,
+            ),
             "sandbox": self.agent.sandbox,
             "branch": _branch_name(self.workspace),
             "history": [
-                event.to_dict() for event in history[-MAX_HISTORY_EVENTS:]
+                _browser_event(event) for event in history[-MAX_HISTORY_EVENTS:]
             ],
             "context": self.agent.context_stats(),
         }
@@ -310,7 +315,7 @@ class WebSession:
         self._enqueue(
             loop,
             queue,
-            {"type": "event", "event": event.to_dict()},
+            {"type": "event", "event": _browser_event(event)},
         )
 
     @staticmethod
@@ -512,6 +517,14 @@ def _is_local_origin(origin: str | None) -> bool:
 
 def _protocol_error(message: str) -> dict[str, Any]:
     return {"type": "protocol_error", "message": message}
+
+
+def _browser_event(event: AgentEvent) -> dict[str, Any]:
+    data = event.to_dict()
+    if event.event_type is EventType.ASSISTANT_MESSAGE:
+        data["payload"].pop("reasoning_details", None)
+        data["payload"].pop("reasoning", None)
+    return data
 
 
 def _branch_name(workspace: Path) -> str:

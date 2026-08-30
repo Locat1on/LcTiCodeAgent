@@ -25,15 +25,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         event_types: list[str] = []
+        assistant_payloads: list[dict] = []
         while "turn.completed" not in event_types:
             message = json.loads(websocket.recv())
             if message.get("type") == "event":
-                event_types.append(message["event"]["event_type"])
+                event = message["event"]
+                event_types.append(event["event_type"])
+                if event["event_type"] == "assistant.message":
+                    assistant_payloads.append(event["payload"])
 
     print("websocket_smoke=passed")
     print(f"session={ready['session_id']}")
     print(f"events={len(event_types)}")
     print(f"tool_requested={'tool.requested' in event_types}")
+    print(f"reasoning_visible={'assistant.reasoning_delta' in event_types}")
+    browser_has_raw = any(
+        "reasoning" in payload or "reasoning_details" in payload
+        for payload in assistant_payloads
+    )
+    print(f"browser_has_raw_reasoning={browser_has_raw}")
     return 0
 
 

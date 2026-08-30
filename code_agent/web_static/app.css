@@ -487,6 +487,66 @@ pre {
   white-space: pre-wrap;
 }
 
+.reasoning-block {
+  position: relative;
+  margin: 0 0 12px;
+  border: 1.5px solid #7f62b3;
+  border-radius: 11px 7px 12px 8px;
+  background: #f6f0ff;
+  box-shadow: 2px 2px 0 var(--lilac-soft);
+}
+
+.reasoning-block::before {
+  position: absolute;
+  top: 14px;
+  left: -25px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--lilac);
+  border-radius: 50%;
+  background: var(--paper);
+  content: "";
+}
+
+.reasoning-block summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 43px;
+  padding: 8px 11px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.reasoning-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-block summary svg {
+  width: 19px;
+  height: 19px;
+  color: #7753b4;
+}
+
+.reasoning-block summary strong {
+  color: #63448f;
+  font-size: 13px;
+}
+
+.reasoning-block summary time {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+
+.reasoning-block p {
+  margin: 0 12px 12px 38px;
+  color: #4f4564;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
 .tool-step {
   position: relative;
   margin: 0 0 8px;
@@ -1204,7 +1264,8 @@ pre {
   .activity::before { left: 24px; }
   .event-block::before,
   .tool-step::before,
-  .approval-card::before { left: -20px; }
+  .approval-card::before,
+  .reasoning-block::before { left: -20px; }
   .tool-summary {
     grid-template-columns: 27px minmax(120px, 1fr) auto 22px;
   }

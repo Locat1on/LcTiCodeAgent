@@ -8,6 +8,7 @@ const state = {
   tools: new Map(),
   approvals: new Map(),
   assistantStream: null,
+  reasoningStream: null,
 };
 
 const elements = {
@@ -77,6 +78,7 @@ const iconPaths = {
   chevron: ["M7 9l5 5 5-5"],
   flag: ["M5 21V4", "M5 5h11l-2 4 2 4H5"],
   user: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8", "M4.5 21a7.5 7.5 0 0 1 15 0"],
+  spark: ["M12 3l1.3 4.2L17 9l-3.7 1.8L12 15l-1.3-4.2L7 9l3.7-1.8z", "M18 15l.7 2.3L21 18l-2.3.7L18 21l-.7-2.3L15 18l2.3-.7z"],
 };
 
 function createSvgIcon(name) {
@@ -132,7 +134,9 @@ function handleMessage(message) {
     state.sessionId = message.session_id;
     elements.workspacePath.textContent = message.workspace;
     elements.workspacePath.title = message.workspace;
-    elements.modelName.textContent = message.model;
+    elements.modelName.textContent = message.reasoning_effort
+      ? `${message.model} · ${message.reasoning_effort}`
+      : message.model;
     elements.sandboxName.textContent = message.sandbox;
     elements.branchName.textContent = message.branch || "—";
     for (const event of message.history || []) renderEvent(event, true);
@@ -171,7 +175,15 @@ function renderEvent(event, replay) {
     }
   } else if (type === "assistant.delta") {
     if (!replay) appendAssistantDelta(payload.text || "", event.timestamp);
+  } else if (type === "assistant.reasoning_delta") {
+    if (!replay) appendReasoningDelta(payload.text || "", event.timestamp, payload.kind);
   } else if (type === "assistant.message") {
+    finalizeReasoning(
+      payload.reasoning_display || payload.reasoning_summary || "",
+      event.timestamp,
+      replay,
+      payload.reasoning_display_kind || "summary",
+    );
     finalizeAssistant(payload.text || "", event.timestamp, replay);
   } else if (type === "tool.requested") {
     hideWelcome();
@@ -247,6 +259,46 @@ function appendAssistantDelta(text, timestamp) {
     state.assistantStream = appendConversation("LcTiCodeAgent", "", timestamp, true);
   }
   state.assistantStream.copy.textContent += text;
+}
+
+function appendReasoningDelta(text, timestamp, kind = "summary") {
+  if (!text) return;
+  if (!state.reasoningStream) {
+    const details = document.createElement("details");
+    details.className = "reasoning-block";
+    details.open = true;
+    const heading = document.createElement("summary");
+    const icon = createSvgIcon("spark");
+    const label = document.createElement("strong");
+    label.textContent = reasoningLabel(kind);
+    const time = document.createElement("time");
+    time.textContent = formatTime(timestamp);
+    heading.append(icon, label, time);
+    const copy = document.createElement("p");
+    details.append(heading, copy);
+    elements.activity.append(details);
+    state.reasoningStream = { details, copy, label, kind };
+  } else if (kind && state.reasoningStream.kind !== kind) {
+    state.reasoningStream.kind = kind;
+    state.reasoningStream.label.textContent = reasoningLabel(kind);
+  }
+  state.reasoningStream.copy.textContent += text;
+}
+
+function finalizeReasoning(text, timestamp, replay, kind = "summary") {
+  if (state.reasoningStream && !replay) {
+    if (!state.reasoningStream.copy.textContent && text) {
+      state.reasoningStream.copy.textContent = text;
+    }
+    state.reasoningStream = null;
+    return;
+  }
+  if (replay && text) appendReasoningDelta(text, timestamp, kind);
+  if (replay) state.reasoningStream = null;
+}
+
+function reasoningLabel(kind) {
+  return kind === "provider_text" ? "模型推理（提供商返回）" : "思考摘要";
 }
 
 function finalizeAssistant(text, timestamp, replay) {
