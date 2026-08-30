@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>LcTiCodeAgent</title>
+    <link rel="icon" href="/static/mascot.png" type="image/png" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="app">
+      <header class="topbar">
+        <button class="brand" type="button" aria-label="LcTiCodeAgent 首页">
+          <img src="/static/mascot.png" alt="" />
+          <span>LcTiCodeAgent</span>
+        </button>
+        <div class="topbar-meta">
+          <div class="meta-item workspace-meta">
+            <span class="meta-icon" aria-hidden="true">▰</span>
+            <span class="meta-label">工作区</span>
+            <code id="workspacePath">连接中…</code>
+          </div>
+          <div class="meta-item">
+            <span class="meta-icon sparkle" aria-hidden="true">✦</span>
+            <span class="meta-label">模型</span>
+            <span id="modelName">—</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-icon shield" aria-hidden="true">◇</span>
+            <span class="meta-label">沙箱</span>
+            <span id="sandboxName">—</span>
+          </div>
+          <div class="context-mini" aria-label="上下文占用">
+            <span>上下文</span>
+            <strong id="contextPercent">0%</strong>
+            <span class="mini-segments" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i>
+            </span>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="icon-button mobile-only" id="sessionsToggle" type="button" aria-label="打开会话列表">☰</button>
+          <button class="icon-button mobile-only" id="inspectorToggle" type="button" aria-label="打开检查器">◫</button>
+        </div>
+      </header>
+
+      <aside class="sessions-rail" id="sessionsRail" aria-label="会话列表">
+        <div class="rail-heading">
+          <h2>会话</h2>
+          <button class="add-session" id="newSession" type="button" aria-label="新建会话">＋</button>
+        </div>
+        <nav class="session-list" id="sessionList"></nav>
+        <div class="rail-footer">
+          <button class="icon-button" type="button" aria-label="设置">⚙</button>
+          <button class="icon-button" type="button" aria-label="帮助">?</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <div class="workspace-heading">
+          <div>
+            <h1>会话：<span id="sessionTitle">新会话</span></h1>
+          </div>
+          <div class="run-state" id="runState" data-state="idle">
+            <span class="state-dot"></span>
+            <span>等待任务</span>
+          </div>
+        </div>
+
+        <section class="activity" id="activity" aria-live="polite" aria-label="Agent 活动记录">
+          <div class="welcome" id="welcome">
+            <img src="/static/mascot.png" alt="蓝色代码助手" />
+            <div>
+              <h2>从一个真实任务开始</h2>
+              <p>描述你希望检查、修改或验证的代码。工具执行和证据会沿着任务路径依次出现。</p>
+            </div>
+          </div>
+        </section>
+
+        <form class="composer" id="composer">
+          <label class="sr-only" for="taskInput">描述下一步任务</label>
+          <textarea id="taskInput" rows="2" maxlength="20000" placeholder="描述下一步任务…"></textarea>
+          <div class="composer-footer">
+            <div class="composer-hints" aria-hidden="true">
+              <span>/ 帮助</span><span>@ 引用</span><span># 文件</span><span>Ctrl+Enter 发送</span>
+            </div>
+            <div class="composer-actions">
+              <button class="stop-button" id="stopButton" type="button" disabled>
+                <span aria-hidden="true">■</span> 停止
+              </button>
+              <button class="send-button" id="sendButton" type="submit" aria-label="发送任务">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l17 8-17 8 3.4-7L16 12l-8.6-1L4 4z" /></svg>
+              </button>
+            </div>
+          </div>
+        </form>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-label="任务检查器">
+        <div class="inspector-tabs" role="tablist">
+          <button role="tab" aria-selected="true" data-tab="context">上下文</button>
+          <button role="tab" aria-selected="false" data-tab="security">安全</button>
+          <button role="tab" aria-selected="false" data-tab="git">Git</button>
+        </div>
+
+        <section class="inspector-pane active" id="contextPane" data-pane="context">
+          <div class="pane-heading">
+            <h2>上下文使用情况</h2>
+            <strong id="contextUsed">0 / 32,000</strong>
+          </div>
+          <div class="context-bar" id="contextBar" aria-label="上下文分层占用"></div>
+          <div class="context-layers" id="contextLayers"></div>
+          <dl class="memory-ledger">
+            <div><dt><span class="ledger-icon file">▱</span> Modified files</dt><dd id="modifiedCount">0</dd></div>
+            <div><dt><span class="ledger-icon command">›_</span> Verified commands</dt><dd id="verifiedCount">0</dd></div>
+            <div><dt><span class="ledger-icon error">!</span> Open errors</dt><dd id="errorCount">0</dd></div>
+          </dl>
+          <div class="compact-control">
+            <div class="compact-heading"><strong>75% 触发摘要 → 50% 目标</strong><span id="compactCurrent">当前 0%</span></div>
+            <div class="compact-track"><span id="compactFill"></span><i></i></div>
+            <button id="compactButton" type="button">立即摘要</button>
+          </div>
+          <div class="recall-control">
+            <label for="recallInput">回溯原始事件</label>
+            <div><input id="recallInput" placeholder="event_id" /><button id="recallButton" type="button">回溯</button></div>
+          </div>
+        </section>
+
+        <section class="inspector-pane" id="securityPane" data-pane="security">
+          <div class="pane-heading"><h2>Workspace Policy</h2><span class="verified-mark">已启用</span></div>
+          <p class="pane-copy">文件操作限定在当前工作区，高风险网络与 Git 操作需要一次性批准。</p>
+          <dl class="security-ledger">
+            <div><dt>Capability Gate</dt><dd>ALLOWLIST</dd></div>
+            <div><dt>State Gate</dt><dd>SHA-256</dd></div>
+            <div><dt>Evidence Ledger</dt><dd>JSONL</dd></div>
+            <div><dt>Pending approval</dt><dd id="pendingApproval">0</dd></div>
+          </dl>
+          <button class="clear-button" id="clearButton" type="button">清除模型上下文</button>
+        </section>
+
+        <section class="inspector-pane" id="gitPane" data-pane="git">
+          <div class="pane-heading"><h2>Git Preflight</h2><span id="gitStatus">等待检查</span></div>
+          <div id="gitDetails" class="git-details">
+            <p class="empty-copy">Git 审批出现时，这里会展示远端、分支、提交和 Secret Scan 证据。</p>
+          </div>
+        </section>
+      </aside>
+
+      <footer class="statusbar">
+        <div><svg class="branch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7.2v9.6M8.2 14c5.5 0 7.6-1.6 7.6-3"/></svg><strong id="branchName">main</strong></div>
+        <div>会话事件 <strong id="eventCount">0</strong></div>
+        <div><span class="status-dot"></span><span id="localMode">本地模式（仅本机）</span></div>
+        <div class="status-spacer"></div>
+        <div><span class="status-dot" id="connectionDot"></span><span id="connectionState">连接中</span></div>
+      </footer>
+    </div>
+
+    <dialog class="recall-dialog" id="recallDialog">
+      <form method="dialog"><button aria-label="关闭">×</button></form>
+      <h2>原始事件</h2>
+      <pre id="recallContent"></pre>
+    </dialog>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
