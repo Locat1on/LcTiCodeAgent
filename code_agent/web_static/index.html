@@ -79,11 +79,13 @@
         </section>
 
         <form class="composer" id="composer">
+          <div class="reference-tray" id="referenceTray" aria-label="已选择的引用" hidden></div>
+          <div class="suggestion-panel" id="suggestionPanel" role="listbox" aria-label="输入建议" hidden></div>
           <label class="sr-only" for="taskInput">描述下一步任务</label>
           <textarea id="taskInput" rows="2" maxlength="20000" placeholder="描述下一步任务…"></textarea>
           <div class="composer-footer">
             <div class="composer-hints" aria-hidden="true">
-              <span>/ 帮助</span><span>@ 引用</span><span># 文件</span><span>Ctrl+Enter 发送</span>
+              <span>/ 命令</span><span>@ 文件</span><span># 上下文</span><span>Ctrl+Enter 发送</span>
             </div>
             <div class="composer-actions">
               <button class="stop-button" id="stopButton" type="button" disabled>

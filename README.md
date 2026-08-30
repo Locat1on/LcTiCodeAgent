@@ -8,6 +8,7 @@
 
 - 交互式终端会话
 - Starlette + WebSocket 本地 Web UI，与 CLI 共用 `AgentEvent`、Agent Loop 和 JSONL 日志
+- Web 智能输入框：`/` 命令面板、`@` 安全文件引用、`#` Git/Context/Session/Event 证据引用
 - 流式显示 Agent 回复
 - 显示工具调用、成功、失败和审批状态
 - 显示上下文 token 使用量
@@ -55,7 +56,7 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 .\.venv\Scripts\python.exe -m code_agent.web --live
 ```
 
-浏览器访问 `http://127.0.0.1:8765`。服务只允许绑定本机回环地址；模型密钥始终留在后端。Web UI 支持流式事件、会话恢复、停止、上下文压缩、证据回溯和一次性审批。详见 [docs/web-ui.md](docs/web-ui.md)。
+浏览器访问 `http://127.0.0.1:8765`。服务只允许绑定本机回环地址；模型密钥始终留在后端。Web UI 支持流式事件、会话恢复、停止、上下文压缩、证据回溯、一次性审批，以及 `/ @ #` 键盘建议。详见 [docs/web-ui.md](docs/web-ui.md)。
 
 使用 OpenRouter 运行真实单任务：
 

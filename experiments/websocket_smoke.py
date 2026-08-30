@@ -13,14 +13,34 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="ws://127.0.0.1:8765/ws")
     parser.add_argument("--prompt", default="检查注册功能")
+    parser.add_argument("--reference-file")
     args = parser.parse_args(argv)
     parsed = urlsplit(args.url)
     origin = f"http://{parsed.hostname}:{parsed.port or 80}"
     with connect(args.url, origin=origin) as websocket:
         ready = json.loads(websocket.recv())
+        references = []
+        if args.reference_file:
+            websocket.send(
+                json.dumps(
+                    {
+                        "type": "suggest",
+                        "trigger": "@",
+                        "query": args.reference_file,
+                        "request_id": "smoke-file",
+                    }
+                )
+            )
+            suggestions = json.loads(websocket.recv())
+            match = next(
+                item
+                for item in suggestions["items"]
+                if item["value"] == args.reference_file
+            )
+            references.append({"kind": match["kind"], "value": match["value"]})
         websocket.send(
             json.dumps(
-                {"type": "run", "text": args.prompt},
+                {"type": "run", "text": args.prompt, "references": references},
                 ensure_ascii=False,
             )
         )
@@ -44,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         for payload in assistant_payloads
     )
     print(f"browser_has_raw_reasoning={browser_has_raw}")
+    print(f"reference_attached={bool(references)}")
     return 0
 
 

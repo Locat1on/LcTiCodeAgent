@@ -9,6 +9,15 @@ const state = {
   approvals: new Map(),
   assistantStream: null,
   reasoningStream: null,
+  references: new Map(),
+  suggestion: {
+    items: [],
+    index: 0,
+    trigger: null,
+    start: 0,
+    end: 0,
+    requestId: null,
+  },
 };
 
 const elements = {
@@ -43,9 +52,21 @@ const elements = {
   recallInput: document.querySelector("#recallInput"),
   recallDialog: document.querySelector("#recallDialog"),
   recallContent: document.querySelector("#recallContent"),
+  referenceTray: document.querySelector("#referenceTray"),
+  suggestionPanel: document.querySelector("#suggestionPanel"),
   sessionsRail: document.querySelector("#sessionsRail"),
   inspector: document.querySelector("#inspector"),
 };
+
+const commands = [
+  { value: "help", label: "/help", description: "显示 Web UI 命令说明" },
+  { value: "status", label: "/status", description: "显示连接、会话和事件状态" },
+  { value: "context", label: "/context", description: "打开 Context 检查器" },
+  { value: "compact", label: "/compact", description: "立即执行上下文压缩" },
+  { value: "clear", label: "/clear", description: "清除模型上下文，保留日志" },
+  { value: "recall", label: "/recall", description: "回溯一个 event_id" },
+  { value: "new", label: "/new", description: "新建会话" },
+];
 
 const toolIcons = {
   search_text: "search",
@@ -152,6 +173,12 @@ function handleMessage(message) {
     updateContext(message.context || {});
     return;
   }
+  if (message.type === "suggestions") {
+    if (message.request_id === state.suggestion.requestId) {
+      showSuggestions(message.items || []);
+    }
+    return;
+  }
   if (message.type === "recalled") {
     showRecalledEvent(message);
     return;
@@ -169,7 +196,13 @@ function renderEvent(event, replay) {
 
   if (type === "user.message") {
     hideWelcome();
-    appendConversation("用户", payload.text || "", event.timestamp, false);
+    const conversation = appendConversation(
+      "用户",
+      payload.text || "",
+      event.timestamp,
+      false,
+    );
+    appendEventReferences(conversation.block, payload.references || []);
     if (!replay && payload.text) {
       elements.sessionTitle.textContent = payload.text.slice(0, 42);
     }
@@ -682,6 +715,216 @@ function renderSessions(sessions) {
   }
 }
 
+function activeTrigger() {
+  const caret = elements.taskInput.selectionStart;
+  const before = elements.taskInput.value.slice(0, caret);
+  const match = before.match(/(^|\s)([/@#])([^\s]*)$/);
+  if (!match) return null;
+  const trigger = match[2];
+  if (trigger === "/" && match.index !== 0) return null;
+  const tokenStart = before.length - match[3].length - 1;
+  return {
+    trigger,
+    query: match[3],
+    start: tokenStart,
+    end: caret,
+  };
+}
+
+function updateSuggestions() {
+  const active = activeTrigger();
+  if (!active) {
+    closeSuggestions();
+    return;
+  }
+  state.suggestion.trigger = active.trigger;
+  state.suggestion.start = active.start;
+  state.suggestion.end = active.end;
+  state.suggestion.index = 0;
+  if (active.trigger === "/") {
+    const query = active.query.toLowerCase();
+    showSuggestions(
+      commands
+        .filter((command) => command.value.startsWith(query))
+        .map((command) => ({ ...command, kind: "command" })),
+    );
+    return;
+  }
+  const requestId = crypto.randomUUID();
+  state.suggestion.requestId = requestId;
+  send({
+    type: "suggest",
+    trigger: active.trigger,
+    query: active.query,
+    request_id: requestId,
+  });
+}
+
+function showSuggestions(items) {
+  state.suggestion.items = items;
+  state.suggestion.index = 0;
+  elements.suggestionPanel.replaceChildren();
+  if (!items.length) {
+    closeSuggestions();
+    return;
+  }
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "suggestion-item";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === 0));
+    const label = document.createElement("strong");
+    label.textContent = item.label;
+    const description = document.createElement("span");
+    description.textContent = item.description || "";
+    button.append(label, description);
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      chooseSuggestion(index);
+    });
+    elements.suggestionPanel.append(button);
+  });
+  elements.suggestionPanel.hidden = false;
+}
+
+function moveSuggestion(delta) {
+  if (elements.suggestionPanel.hidden || !state.suggestion.items.length) return;
+  state.suggestion.index = (
+    state.suggestion.index + delta + state.suggestion.items.length
+  ) % state.suggestion.items.length;
+  elements.suggestionPanel.querySelectorAll(".suggestion-item").forEach((item, index) => {
+    item.setAttribute("aria-selected", String(index === state.suggestion.index));
+    if (index === state.suggestion.index) item.scrollIntoView({ block: "nearest" });
+  });
+}
+
+function chooseSuggestion(index = state.suggestion.index) {
+  const item = state.suggestion.items[index];
+  if (!item) return;
+  if (item.kind === "command") {
+    replaceActiveToken("");
+    closeSuggestions();
+    executeCommand(item.value);
+    return;
+  }
+  if (item.kind === "context" && item.value === "event:") {
+    const eventId = window.prompt("输入需要回溯的 event_id");
+    if (!eventId || !eventId.trim()) return;
+    item.value = `event:${eventId.trim()}`;
+    item.label = `#event:${eventId.trim()}`;
+  }
+  addReference({ kind: item.kind, value: item.value });
+  replaceActiveToken("");
+  closeSuggestions();
+}
+
+function replaceActiveToken(replacement) {
+  const { start, end } = state.suggestion;
+  const text = elements.taskInput.value;
+  elements.taskInput.value = `${text.slice(0, start)}${replacement}${text.slice(end)}`;
+  elements.taskInput.setSelectionRange(start + replacement.length, start + replacement.length);
+  elements.taskInput.focus();
+}
+
+function closeSuggestions() {
+  state.suggestion.items = [];
+  state.suggestion.requestId = null;
+  elements.suggestionPanel.hidden = true;
+  elements.suggestionPanel.replaceChildren();
+}
+
+function addReference(reference) {
+  const key = `${reference.kind}:${reference.value}`;
+  if (state.references.has(key)) return;
+  state.references.set(key, reference);
+  renderReferenceTray();
+}
+
+function renderReferenceTray() {
+  elements.referenceTray.replaceChildren();
+  for (const [key, reference] of state.references) {
+    const chip = document.createElement("span");
+    chip.className = `reference-chip ${reference.kind}`;
+    const label = document.createElement("span");
+    label.textContent = reference.kind === "file"
+      ? `@${reference.value}`
+      : `#${reference.value}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `移除 ${label.textContent}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.references.delete(key);
+      renderReferenceTray();
+    });
+    chip.append(label, remove);
+    elements.referenceTray.append(chip);
+  }
+  elements.referenceTray.hidden = state.references.size === 0;
+}
+
+function appendEventReferences(block, references) {
+  if (!Array.isArray(references) || !references.length) return;
+  const tray = document.createElement("div");
+  tray.className = "event-references";
+  for (const reference of references) {
+    if (!reference || typeof reference.value !== "string") continue;
+    const chip = document.createElement("span");
+    chip.className = `event-reference ${reference.kind || ""}`;
+    const label = document.createElement("span");
+    label.textContent = reference.kind === "file"
+      ? `@${reference.value}`
+      : `#${reference.value}`;
+    chip.append(label);
+    tray.append(chip);
+  }
+  if (tray.childElementCount) block.append(tray);
+}
+
+function executeCommand(name) {
+  if (name === "help") {
+    showNotice(commands.map((command) => `${command.label} — ${command.description}`).join("\n"), "info");
+  } else if (name === "status") {
+    showNotice(
+      `连接：${elements.connectionState.textContent}\n会话：${state.sessionId || "—"}\n事件：${state.eventCount}`,
+      "info",
+    );
+  } else if (name === "context") {
+    selectTab("context");
+    elements.inspector.classList.add("open");
+  } else if (name === "compact") {
+    send({ type: "compact" });
+  } else if (name === "clear") {
+    if (confirm("清除模型上下文？追加式审计日志不会删除。")) {
+      send({ type: "clear" });
+    }
+  } else if (name === "recall") {
+    selectTab("context");
+    elements.inspector.classList.add("open");
+    elements.recallInput.focus();
+  } else if (name === "new") {
+    location.href = "/";
+  }
+}
+
+function executeTypedCommand(text) {
+  const match = text.trim().match(/^\/([a-z-]+)(?:\s+(.*))?$/i);
+  if (!match) return false;
+  const command = commands.find((item) => item.value === match[1].toLowerCase());
+  if (!command) {
+    showNotice(`未知命令：/${match[1]}`, "error");
+    return true;
+  }
+  if (command.value === "recall" && match[2]) {
+    elements.recallInput.value = match[2].trim();
+    send({ type: "recall", event_id: match[2].trim() });
+    return true;
+  }
+  executeCommand(command.value);
+  return true;
+}
+
 function showRecalledEvent(message) {
   elements.recallContent.textContent = message.event
     ? JSON.stringify(message.event, null, 2)
@@ -731,17 +974,54 @@ elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = elements.taskInput.value.trim();
   if (!text || state.running) return;
-  if (send({ type: "run", text })) {
+  if (executeTypedCommand(text)) {
     elements.taskInput.value = "";
+    closeSuggestions();
+    return;
+  }
+  const references = Array.from(state.references.values());
+  if (send({ type: "run", text, references })) {
+    elements.taskInput.value = "";
+    state.references.clear();
+    renderReferenceTray();
+    closeSuggestions();
     setRunning(true, "正在工作", "running");
   }
 });
 
 elements.taskInput.addEventListener("keydown", (event) => {
+  if (!elements.suggestionPanel.hidden) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSuggestion(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSuggestion(-1);
+      return;
+    }
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      chooseSuggestion();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSuggestions();
+      return;
+    }
+  }
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
     elements.composer.requestSubmit();
   }
+});
+
+elements.taskInput.addEventListener("input", updateSuggestions);
+elements.taskInput.addEventListener("click", updateSuggestions);
+document.addEventListener("click", (event) => {
+  if (!elements.composer.contains(event.target)) closeSuggestions();
 });
 
 elements.stopButton.addEventListener("click", () => {

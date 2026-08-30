@@ -56,6 +56,24 @@ Browser task
 
 Web UI 不提供永久批准、force push 或任意 refspec。
 
+## 智能输入框
+
+输入建议支持鼠标以及 `↑ / ↓ / Enter / Esc`：
+
+- `/`：执行 Web 命令。当前包含 `/help`、`/status`、`/context`、`/compact`、`/clear`、`/recall`、`/new`；
+- `@`：从工作区文件索引选择路径。它只向模型附加路径和“先用 read_file 检查”的说明，不在选择阶段读取文件正文；
+- `#`：附加后端生成的结构化证据，包括 `#git-status`、`#git-diff`、`#context`、`#session` 和 `#event:<id>`。
+
+文件索引复用文件工具的忽略目录和敏感路径规则，拒绝 `.env`、私钥、SSH/AWS 凭据、越界路径和不存在的文件。单次消息最多 12 个引用，展开后的证据总量最多 32,000 字符。
+
+用户事件记录三个层次：
+
+- `text`：浏览器中显示的原始任务；
+- `references`：结构化引用列表；
+- `model_text`：展开证据后真正进入模型上下文的文本。
+
+Session restore 使用 `model_text` 重建上下文。WebSocket 回传用户事件时会移除 `model_text`，避免后端展开的 Git Diff 或 Event 内容无必要地再次进入浏览器；浏览器只显示原始文字与引用标签。
+
 ## 本地安全边界
 
 - WebSocket 拒绝非 localhost Origin；
