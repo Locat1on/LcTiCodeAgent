@@ -1,12 +1,13 @@
 # LcTiCodeAgent
 
-一个从零实现的可对话终端编程智能体。本项目不依赖任何 Agent 框架或 SDK，模型交互、会话历史、上下文管理、工具执行、循环终止与错误处理均由项目自行实现。
+一个从零实现的可对话编程智能体，提供终端与本地 Web UI。本项目不依赖任何 Agent 框架或 SDK，模型交互、会话历史、上下文管理、工具执行、循环终止与错误处理均由项目自行实现。
 
 当前已建立追加式事件日志、可对话终端 UI、OpenRouter 流式 Function Calling、本地文件与受限命令工具、工作区文本搜索、Workspace Policy Sandbox 权限管线、两级上下文压缩（确定性工具裁剪 + 经本地事实校验的结构化 LLM 摘要）、从会话日志确定性恢复模型上下文的会话恢复，以及覆盖注入、伪造证据与命令变体的安全红队回归套件。
 
 ## 当前功能
 
 - 交互式终端会话
+- Starlette + WebSocket 本地 Web UI，与 CLI 共用 `AgentEvent`、Agent Loop 和 JSONL 日志
 - 流式显示 Agent 回复
 - 显示工具调用、成功、失败和审批状态
 - 显示上下文 token 使用量
@@ -39,6 +40,21 @@ py -V:3.12 -m venv .venv
 ```powershell
 .\.venv\Scripts\python.exe -m code_agent --demo
 ```
+
+运行本地 Web UI（默认模拟模式）：
+
+```powershell
+.\.venv\Scripts\python.exe -m code_agent.web
+```
+
+使用 OpenRouter 启动真实 Web Agent：
+
+```powershell
+$env:OPENROUTER_API_KEY = "你的密钥"
+.\.venv\Scripts\python.exe -m code_agent.web --live
+```
+
+浏览器访问 `http://127.0.0.1:8765`。服务只允许绑定本机回环地址；模型密钥始终留在后端。Web UI 支持流式事件、会话恢复、停止、上下文压缩、证据回溯和一次性审批。详见 [docs/web-ui.md](docs/web-ui.md)。
 
 使用 OpenRouter 运行真实单任务：
 
