@@ -178,6 +178,35 @@ def _run_session(agent: LiveAgent, log: SessionLog, prompts: list[str]) -> None:
 
 
 class RestoreTests(unittest.TestCase):
+    def test_restore_uses_composed_model_text_for_referenced_user_message(self) -> None:
+        session_id = "referenced-session"
+        events = [
+            AgentEvent.create(EventType.SESSION_STARTED, session_id, {}),
+            AgentEvent.create(
+                EventType.USER_MESSAGE,
+                session_id,
+                {
+                    "text": "检查文件",
+                    "references": [{"kind": "file", "value": "app.py"}],
+                    "model_text": "检查文件\n\n[User-selected references]\n@app.py",
+                },
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "完成", "tool_calls": None},
+            ),
+        ]
+
+        with test_directory() as workspace:
+            agent = LiveAgent(_TextProvider(), ToolRegistry(workspace))
+            agent.restore(events)
+
+        user = next(
+            message for message in agent._context.messages() if message["role"] == "user"
+        )
+        self.assertIn("@app.py", user["content"])
+
     def test_restore_preserves_reasoning_details_for_tool_continuation(self) -> None:
         session_id = "reasoning-session"
         details = [

@@ -26,6 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .events import AgentEvent, EventType
 from .git_tools import GitInspector, GitToolError
 from .restore import RestoreReport
+from .references import ReferenceError, WorkspaceReferences
 from .security import ApprovalHandler, ApprovalRequest
 from .session import SessionLog
 from .simulator import SimulatedAgent
@@ -140,6 +141,7 @@ class WebSession:
         self.log = SessionLog(session_root, session_id=session_id)
         self.approvals = ApprovalBroker()
         self.agent = agent_factory(self.approvals.wait)
+        self.references = WorkspaceReferences(self.workspace)
         self._cancel = threading.Event()
         self._resumed = session_id is not None
 
@@ -195,21 +197,36 @@ class WebSession:
     def run_turn(
         self,
         text: str,
+        references: list[dict[str, str]],
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue[dict[str, Any] | None],
     ) -> None:
         from uuid import uuid4
 
         self._cancel.clear()
+        try:
+            model_text = self.references.compose_model_text(
+                text,
+                references,
+                context_stats=self.agent.context_stats(),
+                log=self.log,
+            )
+        except ReferenceError as error:
+            self._enqueue(loop, queue, _protocol_error(str(error)))
+            return
         turn_id = str(uuid4())
         user_event = AgentEvent.create(
             EventType.USER_MESSAGE,
             self.log.session_id,
-            {"text": text},
+            {
+                "text": text,
+                "references": references,
+                "model_text": model_text,
+            },
             turn_id=turn_id,
         )
         self._publish(user_event, loop, queue)
-        iterator = self.agent.respond(text, self.log.session_id, turn_id)
+        iterator = self.agent.respond(model_text, self.log.session_id, turn_id)
         evidence_events = {
             EventType.TOOL_APPROVAL_DECIDED,
             EventType.TOOL_COMPLETED,
@@ -252,6 +269,7 @@ class WebSession:
             )
             self._publish(completed, loop, queue)
         finally:
+            self.references.refresh()
             self._enqueue(
                 loop,
                 queue,
@@ -295,6 +313,14 @@ class WebSession:
             "type": "recalled",
             "event_id": event_id,
             "event": event.to_dict() if event else None,
+        }
+
+    def suggest(self, trigger: str, query: str, request_id: str) -> dict[str, Any]:
+        return {
+            "type": "suggestions",
+            "request_id": request_id,
+            "trigger": trigger,
+            "items": self.references.suggest(trigger, query),
         }
 
     def cancel(self) -> None:
@@ -449,9 +475,44 @@ def create_web_app(
                     if active_task is not None and not active_task.done():
                         await queue.put(_protocol_error("a turn is already running"))
                         continue
+                    try:
+                        references = session.references.normalize(
+                            message.get("references")
+                        )
+                    except ReferenceError as error:
+                        await queue.put(_protocol_error(str(error)))
+                        continue
                     active_task = asyncio.create_task(
-                        asyncio.to_thread(session.run_turn, text.strip(), loop, queue)
+                        asyncio.to_thread(
+                            session.run_turn,
+                            text.strip(),
+                            references,
+                            loop,
+                            queue,
+                        )
                     )
+                elif message_type == "suggest":
+                    trigger = message.get("trigger")
+                    query = message.get("query", "")
+                    request_id = message.get("request_id")
+                    if (
+                        trigger not in {"@", "#"}
+                        or not isinstance(query, str)
+                        or not isinstance(request_id, str)
+                    ):
+                        await queue.put(_protocol_error("invalid suggestion request"))
+                    else:
+                        try:
+                            await queue.put(
+                                await asyncio.to_thread(
+                                    session.suggest,
+                                    trigger,
+                                    query[:200],
+                                    request_id,
+                                )
+                            )
+                        except ReferenceError as error:
+                            await queue.put(_protocol_error(str(error)))
                 elif message_type == "approval":
                     request_id = message.get("request_id")
                     approved = message.get("approved")
@@ -521,6 +582,8 @@ def _protocol_error(message: str) -> dict[str, Any]:
 
 def _browser_event(event: AgentEvent) -> dict[str, Any]:
     data = event.to_dict()
+    if event.event_type is EventType.USER_MESSAGE:
+        data["payload"].pop("model_text", None)
     if event.event_type is EventType.ASSISTANT_MESSAGE:
         data["payload"].pop("reasoning_details", None)
         data["payload"].pop("reasoning", None)

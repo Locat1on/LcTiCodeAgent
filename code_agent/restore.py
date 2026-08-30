@@ -71,7 +71,9 @@ def project_session(
     for index, event in enumerate(events):
         try:
             if event.event_type is EventType.USER_MESSAGE:
-                context.add_user(event.payload["text"])
+                context.add_user(
+                    event.payload.get("model_text", event.payload["text"])
+                )
             elif event.event_type is EventType.ASSISTANT_MESSAGE:
                 calls = event.payload.get("tool_calls")
                 context.add_assistant(

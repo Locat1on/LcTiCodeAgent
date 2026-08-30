@@ -37,6 +37,22 @@ SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
 SENSITIVE_DIRECTORIES = {".aws", ".ssh"}
 
 
+def is_sensitive_path(workspace: Path, path: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        return True
+    lower_name = path.name.lower()
+    relative_parts = {part.lower() for part in relative.parts}
+    return (
+        lower_name == ".env"
+        or (lower_name.startswith(".env.") and lower_name != ".env.example")
+        or lower_name in SENSITIVE_NAMES
+        or path.suffix.lower() in SENSITIVE_SUFFIXES
+        or bool(relative_parts & SENSITIVE_DIRECTORIES)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolResult:
     content: str
@@ -671,14 +687,4 @@ class ToolRegistry:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def _is_sensitive(self, path: Path) -> bool:
-        lower_name = path.name.lower()
-        relative_parts = {
-            part.lower() for part in path.relative_to(self.workspace).parts
-        }
-        return (
-            lower_name == ".env"
-            or (lower_name.startswith(".env.") and lower_name != ".env.example")
-            or lower_name in SENSITIVE_NAMES
-            or path.suffix.lower() in SENSITIVE_SUFFIXES
-            or bool(relative_parts & SENSITIVE_DIRECTORIES)
-        )
+        return is_sensitive_path(self.workspace, path)

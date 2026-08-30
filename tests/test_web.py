@@ -16,6 +16,7 @@ from code_agent.security import (
     PermissionRule,
     RiskClass,
 )
+from code_agent.session import SessionLog
 from code_agent.web import ApprovalBroker, create_web_app
 from tests.helpers import test_directory
 
@@ -186,6 +187,78 @@ class ApprovalBrokerTests(unittest.TestCase):
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_websocket_suggests_files_and_context_references(self) -> None:
+        with test_directory() as directory:
+            (directory / "app.py").write_text("value = 1\n", encoding="utf-8")
+            (directory / ".env").write_text("SECRET=value\n", encoding="utf-8")
+            app = create_web_app(directory, directory / "sessions")
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as websocket:
+                    websocket.receive_json()
+                    websocket.send_json(
+                        {
+                            "type": "suggest",
+                            "trigger": "@",
+                            "query": "app",
+                            "request_id": "files-1",
+                        }
+                    )
+                    files = websocket.receive_json()
+                    websocket.send_json(
+                        {
+                            "type": "suggest",
+                            "trigger": "#",
+                            "query": "git",
+                            "request_id": "context-1",
+                        }
+                    )
+                    contexts = websocket.receive_json()
+
+        self.assertEqual(files["request_id"], "files-1")
+        self.assertEqual([item["value"] for item in files["items"]], ["app.py"])
+        self.assertEqual(
+            [item["value"] for item in contexts["items"]],
+            ["git-status", "git-diff"],
+        )
+
+    def test_referenced_run_hides_model_text_from_browser_but_logs_it(self) -> None:
+        with test_directory() as directory:
+            (directory / "app.py").write_text("value = 1\n", encoding="utf-8")
+            session_root = directory / "sessions"
+            app = create_web_app(directory, session_root)
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as websocket:
+                    ready = websocket.receive_json()
+                    websocket.send_json(
+                        {
+                            "type": "run",
+                            "text": "检查文件",
+                            "references": [{"kind": "file", "value": "app.py"}],
+                        }
+                    )
+                    browser_user = None
+                    while True:
+                        message = websocket.receive_json()
+                        if message["type"] != "event":
+                            continue
+                        event = message["event"]
+                        if event["event_type"] == EventType.USER_MESSAGE:
+                            browser_user = event
+                        if event["event_type"] == EventType.TURN_COMPLETED:
+                            break
+
+            log = SessionLog(session_root, session_id=ready["session_id"])
+            logged_user = next(
+                event
+                for event in log.load()
+                if event.event_type is EventType.USER_MESSAGE
+            )
+
+        self.assertEqual(browser_user["payload"]["references"][0]["value"], "app.py")
+        self.assertNotIn("model_text", browser_user["payload"])
+        self.assertIn("@app.py", logged_user.payload["model_text"])
+        self.assertEqual(logged_user.payload["text"], "检查文件")
+
     def test_browser_receives_summary_but_not_raw_reasoning_details(self) -> None:
         with test_directory() as directory:
             app = create_web_app(
