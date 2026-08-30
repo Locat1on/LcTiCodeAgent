@@ -59,6 +59,11 @@ class LiveAgent:
     ) -> None:
         self.provider = provider
         self.model = provider.config.model
+        self.reasoning_effort = getattr(
+            provider.config,
+            "reasoning_effort",
+            None,
+        )
         self.tools = tools
         self.sandbox = tools.command_runner.mode
         configured_steps = getattr(provider.config, "max_steps", DEFAULT_MAX_STEPS)
@@ -87,6 +92,11 @@ class LiveAgent:
                 step_id = str(uuid4())
                 yield from self._maybe_compact(session_id, turn_id, step_id)
                 text_parts: list[str] = []
+                reasoning_summary_parts: list[str] = []
+                reasoning_display_parts: list[str] = []
+                reasoning_display_kind: str | None = None
+                reasoning_text_parts: list[str] = []
+                reasoning_details: list[dict[str, Any]] = []
                 tool_calls: list[ModelToolCall] = []
                 finish_reason = "stop"
                 try:
@@ -104,6 +114,38 @@ class LiveAgent:
                                 turn_id=turn_id,
                                 step_id=step_id,
                             )
+                        elif (
+                            model_event.event_type
+                            is ModelEventType.REASONING_DELTA
+                        ):
+                            if model_event.reasoning_details:
+                                reasoning_details.extend(
+                                    model_event.reasoning_details
+                                )
+                            if model_event.reasoning:
+                                reasoning_text_parts.append(model_event.reasoning)
+                            summary_text = model_event.text or ""
+                            if summary_text:
+                                reasoning_display_parts.append(summary_text)
+                                if model_event.reasoning_kind == "summary":
+                                    reasoning_summary_parts.append(summary_text)
+                                if (
+                                    model_event.reasoning_kind == "summary"
+                                    or reasoning_display_kind is None
+                                ):
+                                    reasoning_display_kind = (
+                                        model_event.reasoning_kind
+                                    )
+                                yield AgentEvent.create(
+                                    EventType.ASSISTANT_REASONING_DELTA,
+                                    session_id,
+                                    {
+                                        "text": summary_text,
+                                        "kind": model_event.reasoning_kind,
+                                    },
+                                    turn_id=turn_id,
+                                    step_id=step_id,
+                                )
                         elif model_event.event_type is ModelEventType.TOOL_CALL:
                             if model_event.tool_call is not None:
                                 tool_calls.append(model_event.tool_call)
@@ -146,6 +188,13 @@ class LiveAgent:
                     return
 
                 text = "".join(text_parts)
+                reasoning_summary = "".join(reasoning_summary_parts)
+                reasoning_display = "".join(reasoning_display_parts)
+                reasoning_text = (
+                    None
+                    if reasoning_details
+                    else "".join(reasoning_text_parts) or None
+                )
                 assistant_calls = (
                     [
                         {
@@ -161,7 +210,12 @@ class LiveAgent:
                     if tool_calls
                     else None
                 )
-                self._context.add_assistant(text, assistant_calls)
+                self._context.add_assistant(
+                    text,
+                    assistant_calls,
+                    reasoning_details or None,
+                    reasoning_text,
+                )
                 yield AgentEvent.create(
                     EventType.ASSISTANT_MESSAGE,
                     session_id,
@@ -169,6 +223,11 @@ class LiveAgent:
                         "text": text,
                         "finish_reason": finish_reason,
                         "tool_calls": assistant_calls,
+                        "reasoning_summary": reasoning_summary,
+                        "reasoning_display": reasoning_display,
+                        "reasoning_display_kind": reasoning_display_kind,
+                        "reasoning_details": reasoning_details or None,
+                        "reasoning": reasoning_text,
                     },
                     turn_id=turn_id,
                     step_id=step_id,

@@ -73,14 +73,24 @@ def _chunk(
     *,
     text: str | None = None,
     tool_calls: list[SimpleNamespace] | None = None,
+    reasoning_details: list[object] | None = None,
     finish_reason: str | None = None,
     usage: SimpleNamespace | None = None,
 ) -> SimpleNamespace:
     choices = []
-    if text is not None or tool_calls is not None or finish_reason is not None:
+    if (
+        text is not None
+        or tool_calls is not None
+        or reasoning_details is not None
+        or finish_reason is not None
+    ):
         choices.append(
             SimpleNamespace(
-                delta=SimpleNamespace(content=text, tool_calls=tool_calls),
+                delta=SimpleNamespace(
+                    content=text,
+                    tool_calls=tool_calls,
+                    reasoning_details=reasoning_details,
+                ),
                 finish_reason=finish_reason,
             )
         )
@@ -95,6 +105,7 @@ class OpenRouterConfigTests(unittest.TestCase):
         self.assertEqual(config.context_budget, 32_000)
         self.assertEqual(config.max_steps, 16)
         self.assertEqual(config.max_retries, 2)
+        self.assertEqual(config.reasoning_effort, "medium")
         self.assertNotIn("secret", repr(config))
 
     def test_missing_api_key_is_rejected(self) -> None:
@@ -123,8 +134,84 @@ class OpenRouterConfigTests(unittest.TestCase):
                         }
                     )
 
+    def test_reasoning_effort_is_validated(self) -> None:
+        for value in ("none", "xhigh", "invalid"):
+            with self.subTest(value=value):
+                with self.assertRaises(OpenRouterConfigurationError):
+                    OpenRouterConfig.from_env(
+                        {
+                            "OPENROUTER_API_KEY": "secret",
+                            "LCTI_REASONING_EFFORT": value,
+                        }
+                    )
+
 
 class OpenRouterProviderTests(unittest.TestCase):
+    def test_stream_emits_only_reasoning_summaries_and_preserves_all_details(
+        self,
+    ) -> None:
+        chunks = [
+            _chunk(
+                reasoning_details=[
+                    SimpleNamespace(
+                        type="reasoning.summary",
+                        summary="先确认任务约束。",
+                        id="summary-1",
+                        format="google-gemini-v1",
+                        index=0,
+                    )
+                ]
+            ),
+            _chunk(
+                reasoning_details=[
+                    SimpleNamespace(
+                        type="reasoning.text",
+                        text="raw internal reasoning",
+                        signature="signature-1",
+                        id="text-1",
+                        format="google-gemini-v1",
+                        index=1,
+                    ),
+                    {
+                        "type": "reasoning.encrypted",
+                        "data": "encrypted-data",
+                        "id": "encrypted-1",
+                        "format": "google-gemini-v1",
+                        "index": 2,
+                    },
+                ]
+            ),
+            _chunk(text="完成。", finish_reason="stop"),
+        ]
+        client = _FakeClient(chunks)
+        provider = OpenRouterProvider(
+            OpenRouterConfig(api_key="secret", reasoning_effort="medium"),
+            client=client,
+        )
+
+        events = list(provider.stream([{"role": "user", "content": "go"}], []))
+
+        reasoning = [
+            event
+            for event in events
+            if event.event_type is ModelEventType.REASONING_DELTA
+        ]
+        self.assertEqual(len(reasoning), 2)
+        self.assertEqual(reasoning[0].text, "先确认任务约束。")
+        self.assertEqual(reasoning[0].reasoning_kind, "summary")
+        self.assertEqual(reasoning[1].text, "raw internal reasoning")
+        self.assertEqual(reasoning[1].reasoning_kind, "provider_text")
+        details = [detail for event in reasoning for detail in event.reasoning_details]
+        self.assertEqual(
+            [detail["type"] for detail in details],
+            ["reasoning.summary", "reasoning.text", "reasoning.encrypted"],
+        )
+        self.assertEqual(details[1]["text"], "raw internal reasoning")
+        self.assertEqual(
+            client.completions.request["extra_body"]["reasoning"],
+            {"effort": "medium", "exclude": False},
+        )
+
     def test_stream_normalizes_text_tool_calls_and_usage(self) -> None:
         first_tool_delta = SimpleNamespace(
             index=0,

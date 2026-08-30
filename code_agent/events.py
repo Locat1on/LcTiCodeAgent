@@ -14,6 +14,7 @@ class EventType(StrEnum):
     SESSION_RESUMED = "session.resumed"
     USER_MESSAGE = "user.message"
     ASSISTANT_DELTA = "assistant.delta"
+    ASSISTANT_REASONING_DELTA = "assistant.reasoning_delta"
     ASSISTANT_MESSAGE = "assistant.message"
     TOOL_REQUESTED = "tool.requested"
     TOOL_APPROVAL_REQUIRED = "tool.approval_required"

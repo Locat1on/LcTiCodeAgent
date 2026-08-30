@@ -10,6 +10,7 @@ from typing import Any
 
 class ModelEventType(StrEnum):
     TEXT_DELTA = "text.delta"
+    REASONING_DELTA = "reasoning.delta"
     TOOL_CALL = "tool.call"
     USAGE = "usage"
     COMPLETED = "completed"
@@ -34,6 +35,9 @@ class ModelUsage:
 class ModelEvent:
     event_type: ModelEventType
     text: str | None = None
+    reasoning: str | None = None
+    reasoning_kind: str | None = None
+    reasoning_details: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     tool_call: ModelToolCall | None = None
     usage: ModelUsage | None = None
     finish_reason: str | None = None
@@ -110,4 +114,3 @@ class ToolCallAccumulator:
                 )
             )
         return calls
-

@@ -178,6 +178,71 @@ def _run_session(agent: LiveAgent, log: SessionLog, prompts: list[str]) -> None:
 
 
 class RestoreTests(unittest.TestCase):
+    def test_restore_preserves_reasoning_details_for_tool_continuation(self) -> None:
+        session_id = "reasoning-session"
+        details = [
+            {
+                "type": "reasoning.encrypted",
+                "data": "opaque-signature",
+                "format": "google-gemini-v1",
+                "index": 0,
+            }
+        ]
+        events = [
+            AgentEvent.create(EventType.SESSION_STARTED, session_id, {}),
+            AgentEvent.create(EventType.USER_MESSAGE, session_id, {"text": "检查"}),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {
+                    "text": "",
+                    "finish_reason": "tool_calls",
+                    "reasoning_summary": "先读取文件。",
+                    "reasoning_details": details,
+                    "reasoning": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path":"app.py"}',
+                            },
+                        }
+                    ],
+                },
+            ),
+            AgentEvent.create(
+                EventType.TOOL_REQUESTED,
+                session_id,
+                {
+                    "call_id": "call-1",
+                    "name": "read_file",
+                    "arguments": {"path": "app.py"},
+                },
+            ),
+            AgentEvent.create(
+                EventType.TOOL_COMPLETED,
+                session_id,
+                {
+                    "call_id": "call-1",
+                    "name": "read_file",
+                    "content": "sha256: abc\n1: value = 1",
+                },
+            ),
+        ]
+
+        with test_directory() as workspace:
+            agent = LiveAgent(_TextProvider(), ToolRegistry(workspace))
+            agent.restore(events)
+
+        assistant = next(
+            message
+            for message in agent._context.messages()
+            if message["role"] == "assistant"
+        )
+        self.assertEqual(assistant["reasoning_details"], details)
+
     def test_restore_rebuilds_identical_context_from_recorded_log(self) -> None:
         with test_directory() as workspace:
             source = workspace / "app.py"

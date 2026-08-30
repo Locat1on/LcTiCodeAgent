@@ -131,6 +131,52 @@ class _FailingProvider:
         yield
 
 
+class _ReasoningProvider:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            context_budget=32_000,
+            model="google/gemini-3.7-flash",
+        )
+        self.requests: list[list[dict[str, object]]] = []
+
+    def stream(self, messages, tools):
+        self.requests.append(list(messages))
+        if len(self.requests) == 1:
+            details = (
+                {
+                    "type": "reasoning.summary",
+                    "summary": "先查看仓库结构。",
+                    "format": "google-gemini-v1",
+                    "index": 0,
+                },
+                {
+                    "type": "reasoning.encrypted",
+                    "data": "opaque",
+                    "format": "google-gemini-v1",
+                    "index": 1,
+                },
+            )
+            yield ModelEvent(
+                ModelEventType.REASONING_DELTA,
+                text="先查看仓库结构。",
+                reasoning_kind="summary",
+                reasoning_details=details,
+            )
+            yield ModelEvent(
+                ModelEventType.TOOL_CALL,
+                tool_call=ModelToolCall(
+                    call_id="call-reasoning",
+                    name="list_files",
+                    arguments={"path": ".", "depth": 1},
+                    raw_arguments='{"path":".","depth":1}',
+                ),
+            )
+            yield ModelEvent(ModelEventType.COMPLETED, finish_reason="tool_calls")
+            return
+        yield ModelEvent(ModelEventType.TEXT_DELTA, text="完成。")
+        yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
+
+
 def _write_big_file(workspace) -> None:
     lines = "\n".join(
         f"def compute_value_for_item(index={index}):" for index in range(250)
@@ -139,6 +185,38 @@ def _write_big_file(workspace) -> None:
 
 
 class LiveAgentTests(unittest.TestCase):
+    def test_reasoning_summary_is_visible_and_details_continue_with_tool_result(
+        self,
+    ) -> None:
+        with test_directory() as workspace:
+            provider = _ReasoningProvider()
+            agent = LiveAgent(provider, ToolRegistry(workspace))
+            events = list(agent.respond("检查仓库", "session-1", "turn-1"))
+
+        reasoning_events = [
+            event
+            for event in events
+            if event.event_type is EventType.ASSISTANT_REASONING_DELTA
+        ]
+        self.assertEqual(reasoning_events[0].payload["text"], "先查看仓库结构。")
+        self.assertEqual(reasoning_events[0].payload["kind"], "summary")
+        assistant = next(
+            event
+            for event in events
+            if event.event_type is EventType.ASSISTANT_MESSAGE
+            and event.payload.get("tool_calls")
+        )
+        self.assertEqual(assistant.payload["reasoning_summary"], "先查看仓库结构。")
+        self.assertEqual(assistant.payload["reasoning_display"], "先查看仓库结构。")
+        self.assertEqual(assistant.payload["reasoning_display_kind"], "summary")
+        self.assertEqual(len(assistant.payload["reasoning_details"]), 2)
+        continued = next(
+            message
+            for message in provider.requests[1]
+            if message["role"] == "assistant"
+        )
+        self.assertEqual(len(continued["reasoning_details"]), 2)
+
     def test_tool_result_is_returned_to_model_before_final_text(self) -> None:
         with test_directory() as workspace:
             (workspace / "README.md").write_text("demo", encoding="utf-8")

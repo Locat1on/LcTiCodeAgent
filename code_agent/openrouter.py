@@ -24,6 +24,7 @@ DEFAULT_MODEL = "google/gemini-3.7-flash"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 RETRY_BASE_SECONDS = 0.5
 RETRYABLE_STATUS_CODES = {408, 409, 429}
+REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
 
 
 class OpenRouterConfigurationError(ValueError):
@@ -47,6 +48,7 @@ class OpenRouterConfig:
     timeout_seconds: float = 60.0
     max_steps: int = 16
     max_retries: int = 2
+    reasoning_effort: str = "medium"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> OpenRouterConfig:
@@ -90,6 +92,11 @@ class OpenRouterConfig:
             raise OpenRouterConfigurationError(
                 "LCTI_OPENROUTER_RETRIES must be between 0 and 5"
             )
+        reasoning_effort = values.get("LCTI_REASONING_EFFORT", "medium").strip()
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise OpenRouterConfigurationError(
+                "LCTI_REASONING_EFFORT must be minimal, low, medium, or high"
+            )
         return cls(
             api_key=api_key,
             model=model,
@@ -97,6 +104,7 @@ class OpenRouterConfig:
             context_budget=context_budget,
             max_steps=max_steps,
             max_retries=max_retries,
+            reasoning_effort=reasoning_effort,
         )
 
 
@@ -139,7 +147,11 @@ class OpenRouterProvider:
                         "provider": {
                             "require_parameters": True,
                             "data_collection": "deny",
-                        }
+                        },
+                        "reasoning": {
+                            "effort": self.config.reasoning_effort,
+                            "exclude": False,
+                        },
                     },
                 )
                 for chunk in stream:
@@ -156,6 +168,41 @@ class OpenRouterProvider:
                         )
                     for choice in chunk.choices:
                         delta = choice.delta
+                        raw_reasoning = getattr(delta, "reasoning", None)
+                        raw_details = getattr(delta, "reasoning_details", None) or []
+                        details = tuple(
+                            _normalize_reasoning_detail(detail)
+                            for detail in raw_details
+                        )
+                        if raw_reasoning or details:
+                            summary = "".join(
+                                str(detail.get("summary") or "")
+                                for detail in details
+                                if detail.get("type") == "reasoning.summary"
+                            )
+                            provider_text = "".join(
+                                str(detail.get("text") or "")
+                                for detail in details
+                                if detail.get("type") == "reasoning.text"
+                            )
+                            visible_reasoning = summary or provider_text
+                            reasoning_kind = (
+                                "summary"
+                                if summary
+                                else "provider_text"
+                                if provider_text
+                                else None
+                            )
+                            output_emitted = True
+                            yield ModelEvent(
+                                ModelEventType.REASONING_DELTA,
+                                text=visible_reasoning or None,
+                                reasoning=(
+                                    str(raw_reasoning) if raw_reasoning else None
+                                ),
+                                reasoning_kind=reasoning_kind,
+                                reasoning_details=details,
+                            )
                         if delta.content:
                             output_emitted = True
                             yield ModelEvent(
@@ -276,3 +323,19 @@ class OpenRouterProvider:
         return OpenRouterRequestError(
             f"OpenRouter {operation} failed: {type(error).__name__}{suffix}"
         )
+
+
+def _normalize_reasoning_detail(detail: Any) -> dict[str, Any]:
+    if isinstance(detail, dict):
+        return dict(detail)
+    model_dump = getattr(detail, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="json")
+        if isinstance(dumped, dict):
+            return dumped
+    values = vars(detail) if hasattr(detail, "__dict__") else {}
+    return {
+        key: value
+        for key, value in values.items()
+        if isinstance(key, str)
+    }

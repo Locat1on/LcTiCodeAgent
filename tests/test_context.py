@@ -106,6 +106,23 @@ class TokenCounterTests(unittest.TestCase):
 
 
 class ContextProjectionTests(unittest.TestCase):
+    def test_reasoning_details_are_preserved_in_assistant_messages(self) -> None:
+        manager = ContextManager("SYS")
+        details = [
+            {
+                "type": "reasoning.encrypted",
+                "data": "opaque",
+                "format": "google-gemini-v1",
+                "index": 0,
+            }
+        ]
+        manager.add_assistant("", None, details)
+
+        rendered = manager.messages()
+        self.assertEqual(rendered[-1]["reasoning_details"], details)
+        rendered[-1]["reasoning_details"][0]["data"] = "changed"
+        self.assertEqual(manager.messages()[-1]["reasoning_details"], details)
+
     def test_messages_match_legacy_chat_format(self) -> None:
         manager = ContextManager("SYS")
         manager.add_user("hello")

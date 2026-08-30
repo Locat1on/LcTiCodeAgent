@@ -74,7 +74,12 @@ def project_session(
                 context.add_user(event.payload["text"])
             elif event.event_type is EventType.ASSISTANT_MESSAGE:
                 calls = event.payload.get("tool_calls")
-                context.add_assistant(event.payload.get("text", ""), calls)
+                context.add_assistant(
+                    event.payload.get("text", ""),
+                    calls,
+                    event.payload.get("reasoning_details"),
+                    event.payload.get("reasoning"),
+                )
                 for call in calls or []:
                     declared[call["id"]] = {
                         "name": call["function"]["name"],

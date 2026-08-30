@@ -15,6 +15,7 @@ class SimulatedAgent:
     model = "simulator"
     sandbox = "simulation"
     context_limit = 32_000
+    reasoning_effort = None
 
     def __init__(self) -> None:
         self.used_tokens = 1_200

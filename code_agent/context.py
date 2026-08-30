@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -69,6 +70,8 @@ class ContextItem:
     tool_args_key: str | None = None
     source_event_id: str | None = None
     tool_calls: tuple[dict[str, Any], ...] | None = None
+    reasoning_details: tuple[dict[str, Any], ...] | None = None
+    reasoning: str | None = None
     pruned: bool = False
 
 
@@ -398,8 +401,11 @@ class ContextManager:
         self,
         text: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_details: list[dict[str, Any]] | None = None,
+        reasoning: str | None = None,
     ) -> ContextItem:
-        calls = tuple(tool_calls) if tool_calls else None
+        calls = tuple(deepcopy(tool_calls)) if tool_calls else None
+        details = tuple(deepcopy(reasoning_details)) if reasoning_details else None
         tokens = TokenCounter.estimate(text)
         if calls:
             tokens += sum(
@@ -407,6 +413,12 @@ class ContextManager:
                 + TokenCounter.estimate(call["function"]["arguments"])
                 for call in calls
             )
+        if details:
+            tokens += TokenCounter.estimate(
+                json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+            )
+        elif reasoning:
+            tokens += TokenCounter.estimate(reasoning)
         item = ContextItem(
             item_id=str(uuid4()),
             role="assistant",
@@ -414,6 +426,8 @@ class ContextManager:
             layer=ContextLayer.RECENT,
             tokens=tokens,
             tool_calls=calls,
+            reasoning_details=details,
+            reasoning=reasoning,
         )
         self._items.append(item)
         return item
@@ -472,6 +486,12 @@ class ContextManager:
                         }
                         for call in item.tool_calls
                     ]
+                if item.reasoning_details:
+                    message["reasoning_details"] = deepcopy(
+                        list(item.reasoning_details)
+                    )
+                elif item.reasoning:
+                    message["reasoning"] = item.reasoning
                 rendered.append(message)
             else:
                 rendered.append({"role": item.role, "content": item.content})
