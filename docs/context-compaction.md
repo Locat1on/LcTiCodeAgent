@@ -31,6 +31,19 @@
 - 手动：`/compact` 先执行第一层；若仍高于 50%，再尝试第二层。
 - 预算来自 `LCTI_CONTEXT_BUDGET`（默认 32000）。
 
+## 可比较策略
+
+`LCTI_COMPACTION_STRATEGY` 控制同一 Agent Loop 使用的策略：
+
+| 值 | 行为 |
+|---|---|
+| `none` | 不执行任何自动压缩；手动压缩只记录 no-op |
+| `drop_oldest` | 75% 触发，按完整旧轮次删除到 50%，不留下失配 tool 消息 |
+| `plain_summary` | 75% 触发普通文本摘要到 50%，不执行事实校验 |
+| `validated` | 默认；60% 确定性工具裁剪，75% 触发结构化事实校验摘要 |
+
+基线策略不是独立模拟脚本：它们进入相同的 Provider、工具、安全策略、事件日志和 Session restore 路径。`drop_oldest` 与 `plain_summary` 的压缩事件也可从 JSONL 确定性重放。
+
 ## 结构化摘要与事实校验
 
 `code_agent/summary.py` 提供固定的 `SUMMARY_SCHEMA`，只接受以下字段：目标、已完成事项、决策、文件与标识符、命令与退出码、未解决错误、下一步，以及对应事件 ID。OpenRouter 请求把完整 Schema 与旧上下文一同发送，使用 `json_object` 保证 JSON 语法、温度为 0；提供商返回后由本地校验器严格执行字段、长度和事实约束。因此安全边界不依赖上游是否实现某个 `strict` 方言。
@@ -80,7 +93,11 @@
 
 ## 对比实验
 
-运行 `python -m experiments.context_compaction`，可在同一确定性夹具上比较 `no_compression`、`drop_oldest`、`plain_summary` 和 `validated_structured_summary`。统一采集估算 token、压缩率、关键事实召回率、事件 ID 召回率、工具消息配对有效性和校验状态。该夹具用于验证机制与指标管线，不冒充真实模型质量基准；后续可用真实任务日志扩充样本。
+`python -m experiments.context_compaction` 是确定性机制夹具，用于快速验证压缩率、关键事实、事件 ID 和工具消息配对。
+
+`python -m experiments.context_benchmark` 在四份独立 `buggy_average` 工作区上运行真实多轮 Gemini 任务，统一采集任务成功、测试文件约束、标识符保留、测试证据准确率、最大有效压缩率、prompt/completion token、重复读取、可恢复事件、验证拒绝和耗时。
+
+2026-08-31 的单次结果见 `docs/evaluation/context-benchmark-20260831.md`。该结果是功能性预实验，不是多任务、多随机种子的统计结论。
 
 ## 已知局限
 

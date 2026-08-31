@@ -14,6 +14,7 @@
 - 显示上下文 token 使用量
 - 将全部事件持久化为 JSONL
 - 分层上下文管理：60% 确定性工具裁剪；75% 触发固定 Schema 的结构化摘要并以 50% 为软目标；摘要的路径、标识符、数字、exit code 和事件 ID 均在本地校验
+- 可切换压缩策略：`none / drop_oldest / plain_summary / validated`，用于同 Agent Loop 的公平对比
 - `/recall EVENT_ID` 从追加式 JSONL 取回被摘要的原始证据；`/compact` 手动压缩；`/context` 分层统计
 - 会话恢复：`--resume <SESSION_ID>` 从 JSONL 日志确定性重建模型上下文、工作记忆和 token 用量
 - `/help`、`/status`、`/context`、`/compact`、`/clear`、`/exit` 命令
@@ -100,5 +101,13 @@ Workspace Policy Sandbox无需Docker、WSL或管理员权限。它限制所有�
 ```powershell
 .\.venv\Scripts\python.exe -m experiments.context_compaction
 ```
+
+运行真实多轮 `buggy_average` 四策略评测（会产生 OpenRouter 调用并写入被忽略的 `tmp/`）：
+
+```powershell
+.\.venv\Scripts\python.exe -m experiments.context_benchmark
+```
+
+2026-08-31 的单次真实结果中，四种策略均完成修复并通过测试；`validated` 的最大单次压缩比为 `0.2315`，但因一次摘要被事实校验拒绝，其总 prompt token 并未优于基线。详见 [评测报告](docs/evaluation/context-benchmark-20260831.md)。
 
 API key 仅通过环境变量读取，不会写入仓库、日志或视频。
