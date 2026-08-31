@@ -10,6 +10,10 @@ const state = {
   assistantStream: null,
   reasoningStream: null,
   references: new Map(),
+  selectedSession: null,
+  providerId: null,
+  model: null,
+  providers: [],
   suggestion: {
     items: [],
     index: 0,
@@ -56,6 +60,20 @@ const elements = {
   suggestionPanel: document.querySelector("#suggestionPanel"),
   sessionsRail: document.querySelector("#sessionsRail"),
   inspector: document.querySelector("#inspector"),
+  sessionDialog: document.querySelector("#sessionDialog"),
+  sessionForm: document.querySelector("#sessionForm"),
+  sessionDialogMeta: document.querySelector("#sessionDialogMeta"),
+  sessionTitleInput: document.querySelector("#sessionTitleInput"),
+  deleteSession: document.querySelector("#deleteSession"),
+  providerSettingsButton: document.querySelector("#providerSettingsButton"),
+  providerSettingsCompact: document.querySelector("#providerSettingsCompact"),
+  providerDialog: document.querySelector("#providerDialog"),
+  providerForm: document.querySelector("#providerForm"),
+  providerSelect: document.querySelector("#providerSelect"),
+  providerModelInput: document.querySelector("#providerModelInput"),
+  providerModels: document.querySelector("#providerModels"),
+  providerHint: document.querySelector("#providerHint"),
+  applyProvider: document.querySelector("#applyProvider"),
 };
 
 const commands = [
@@ -123,8 +141,15 @@ function websocketUrl() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams(location.search);
   const sessionId = params.get("session");
-  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
-  return `${protocol}//${location.host}/ws${query}`;
+  const query = new URLSearchParams();
+  if (sessionId) {
+    query.set("session_id", sessionId);
+  } else {
+    if (params.get("provider")) query.set("provider", params.get("provider"));
+    if (params.get("model")) query.set("model", params.get("model"));
+  }
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return `${protocol}//${location.host}/ws${suffix}`;
 }
 
 function connect() {
@@ -153,6 +178,8 @@ function connect() {
 function handleMessage(message) {
   if (message.type === "ready") {
     state.sessionId = message.session_id;
+    state.providerId = message.provider;
+    state.model = message.model;
     elements.workspacePath.textContent = message.workspace;
     elements.workspacePath.title = message.workspace;
     elements.modelName.textContent = message.reasoning_effort
@@ -163,6 +190,7 @@ function handleMessage(message) {
     for (const event of message.history || []) renderEvent(event, true);
     updateContext(message.context || {});
     loadSessions();
+    loadProviders();
     return;
   }
   if (message.type === "event") {
@@ -691,9 +719,62 @@ async function loadSessions() {
   }
 }
 
+async function loadProviders() {
+  try {
+    const response = await fetch("/api/providers", { cache: "no-store" });
+    const data = await response.json();
+    state.providers = data.providers || [];
+  } catch (_error) {
+    state.providers = [];
+  }
+}
+
+function openProviderDialog() {
+  elements.providerSelect.replaceChildren();
+  for (const provider of state.providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.disabled = !provider.configured;
+    option.textContent = provider.configured
+      ? provider.label
+      : `${provider.label}（未配置）`;
+    elements.providerSelect.append(option);
+  }
+  const current = state.providers.find((item) => item.id === state.providerId);
+  const fallback = current || state.providers.find((item) => item.configured);
+  if (!fallback) {
+    showNotice("服务端没有可用的模型厂商配置", "error");
+    return;
+  }
+  elements.providerSelect.value = fallback.id;
+  updateProviderFields(fallback);
+  if (fallback.id === state.providerId && state.model) {
+    elements.providerModelInput.value = state.model;
+  }
+  elements.providerDialog.showModal();
+}
+
+function updateProviderFields(provider) {
+  if (!provider) return;
+  elements.providerModels.replaceChildren();
+  for (const model of provider.models || []) {
+    const option = document.createElement("option");
+    option.value = model;
+    elements.providerModels.append(option);
+  }
+  elements.providerModelInput.value = provider.default_model || "";
+  elements.providerModelInput.disabled = !provider.configured;
+  elements.applyProvider.disabled = !provider.configured;
+  elements.providerHint.textContent = provider.configured
+    ? `已由服务端 ${provider.api_key_env || "配置"} 提供凭据；切换会创建新会话。`
+    : `请在启动 Web 服务前设置 ${provider.api_key_env}。`;
+}
+
 function renderSessions(sessions) {
   elements.sessionList.replaceChildren();
   for (const session of sessions) {
+    const row = document.createElement("div");
+    row.className = "session-row";
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-item${session.session_id === state.sessionId ? " active" : ""}`;
@@ -705,14 +786,46 @@ function renderSessions(sessions) {
     time.textContent = relativeTime(session.updated);
     const meta = document.createElement("span");
     meta.className = "session-meta";
-    meta.textContent = `${session.events} 个事件`;
+    meta.textContent = `${session.provider || "default"} · ${session.events} 个事件`;
     button.append(title, time, meta);
     button.addEventListener("click", () => {
       if (session.session_id === state.sessionId) return;
       location.href = `/?session=${encodeURIComponent(session.session_id)}`;
     });
-    elements.sessionList.append(button);
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "session-more";
+    more.textContent = "•••";
+    more.setAttribute("aria-label", `管理会话：${session.title}`);
+    more.addEventListener("click", () => openSessionDialog(session));
+    row.append(button, more);
+    elements.sessionList.append(row);
   }
+}
+
+function openSessionDialog(session) {
+  state.selectedSession = session;
+  elements.sessionTitleInput.value = session.title;
+  elements.sessionDialogMeta.textContent = session.session_id;
+  const isCurrent = session.session_id === state.sessionId;
+  elements.deleteSession.disabled = isCurrent;
+  elements.deleteSession.title = isCurrent ? "请先切换到其他会话再删除" : "";
+  delete elements.deleteSession.dataset.confirm;
+  elements.deleteSession.textContent = "删除会话";
+  elements.sessionDialog.showModal();
+  elements.sessionTitleInput.focus();
+  elements.sessionTitleInput.select();
+}
+
+async function updateSession(method, sessionId, body) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : null,
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "会话操作失败");
+  return data;
 }
 
 function activeTrigger() {
@@ -1036,8 +1149,71 @@ document.querySelector("#recallButton").addEventListener("click", () => {
   if (eventId) send({ type: "recall", event_id: eventId });
 });
 document.querySelector("#newSession").addEventListener("click", () => { location.href = "/"; });
-document.querySelector("#sessionsToggle").addEventListener("click", () => elements.sessionsRail.classList.toggle("open"));
-document.querySelector("#inspectorToggle").addEventListener("click", () => elements.inspector.classList.toggle("open"));
+document.querySelector("#sessionsToggle").addEventListener("click", (event) => {
+  const open = elements.sessionsRail.classList.toggle("open");
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+});
+document.querySelector("#inspectorToggle").addEventListener("click", (event) => {
+  const open = elements.inspector.classList.toggle("open");
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+});
+document.querySelector("#sessionDialogClose").addEventListener("click", () => elements.sessionDialog.close());
+document.querySelector("#cancelSessionEdit").addEventListener("click", () => elements.sessionDialog.close());
+elements.sessionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.selectedSession) return;
+  try {
+    const result = await updateSession(
+      "PATCH",
+      state.selectedSession.session_id,
+      { title: elements.sessionTitleInput.value.trim() },
+    );
+    if (result.session_id === state.sessionId) elements.sessionTitle.textContent = result.title;
+    elements.sessionDialog.close();
+    await loadSessions();
+  } catch (error) {
+    showNotice(error.message || "会话重命名失败", "error");
+  }
+});
+elements.deleteSession.addEventListener("click", async () => {
+  if (!state.selectedSession || elements.deleteSession.disabled) return;
+  if (elements.deleteSession.dataset.confirm !== "true") {
+    elements.deleteSession.dataset.confirm = "true";
+    elements.deleteSession.textContent = "再次点击确认";
+    return;
+  }
+  try {
+    await updateSession("DELETE", state.selectedSession.session_id);
+    elements.sessionDialog.close();
+    await loadSessions();
+  } catch (error) {
+    showNotice(error.message || "会话删除失败", "error");
+  } finally {
+    delete elements.deleteSession.dataset.confirm;
+    elements.deleteSession.textContent = "删除会话";
+  }
+});
+for (const button of [elements.providerSettingsButton, elements.providerSettingsCompact]) {
+  button.addEventListener("click", async () => {
+    if (!state.providers.length) await loadProviders();
+    openProviderDialog();
+  });
+}
+document.querySelector("#providerDialogClose").addEventListener("click", () => elements.providerDialog.close());
+document.querySelector("#cancelProviderEdit").addEventListener("click", () => elements.providerDialog.close());
+elements.providerSelect.addEventListener("change", () => {
+  updateProviderFields(
+    state.providers.find((provider) => provider.id === elements.providerSelect.value),
+  );
+});
+elements.providerForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const provider = state.providers.find((item) => item.id === elements.providerSelect.value);
+  const model = elements.providerModelInput.value.trim();
+  if (!provider?.configured || !model) return;
+  const params = new URLSearchParams({ provider: provider.id, model });
+  location.href = `/?${params.toString()}`;
+});
 document.querySelectorAll(".inspector-tabs [role=tab]").forEach((tab) => {
   tab.addEventListener("click", () => selectTab(tab.dataset.tab));
 });

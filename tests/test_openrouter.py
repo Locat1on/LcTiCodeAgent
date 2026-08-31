@@ -11,6 +11,7 @@ from code_agent.openrouter import (
     OpenRouterConfigurationError,
     OpenRouterProvider,
     OpenRouterRequestError,
+    provider_options_from_env,
 )
 
 
@@ -98,6 +99,46 @@ def _chunk(
 
 
 class OpenRouterConfigTests(unittest.TestCase):
+    def test_provider_options_never_expose_api_keys(self) -> None:
+        options = provider_options_from_env(
+            {
+                "OPENROUTER_API_KEY": "openrouter-secret",
+                "GEMINI_API_KEY": "google-secret",
+            }
+        )
+
+        by_id = {option["id"]: option for option in options}
+        self.assertTrue(by_id["openrouter"]["configured"])
+        self.assertTrue(by_id["google"]["configured"])
+        self.assertFalse(by_id["deepseek"]["configured"])
+        self.assertNotIn("openrouter-secret", repr(options))
+        self.assertNotIn("google-secret", repr(options))
+
+    def test_direct_google_provider_uses_compatible_endpoint(self) -> None:
+        config = OpenRouterConfig.for_provider(
+            "google",
+            env={"GEMINI_API_KEY": "secret"},
+        )
+
+        self.assertEqual(config.provider_id, "google")
+        self.assertEqual(config.model, "gemini-3.7-flash")
+        self.assertEqual(
+            config.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        )
+        self.assertIsNone(config.reasoning_effort)
+
+    def test_custom_provider_requires_https_base_url_and_model(self) -> None:
+        with self.assertRaises(OpenRouterConfigurationError):
+            OpenRouterConfig.for_provider(
+                "compatible",
+                env={
+                    "LCTI_COMPAT_API_KEY": "secret",
+                    "LCTI_COMPAT_BASE_URL": "http://localhost:9000/v1",
+                    "LCTI_COMPAT_MODEL": "model-1",
+                },
+            )
+
     def test_environment_configuration_uses_fixed_model(self) -> None:
         config = OpenRouterConfig.from_env({"OPENROUTER_API_KEY": "secret"})
 
@@ -160,6 +201,23 @@ class OpenRouterConfigTests(unittest.TestCase):
 
 
 class OpenRouterProviderTests(unittest.TestCase):
+    def test_non_openrouter_request_omits_openrouter_extensions(self) -> None:
+        client = _FakeClient([_chunk(text="ok"), _chunk(finish_reason="stop")])
+        provider = OpenRouterProvider(
+            OpenRouterConfig(
+                api_key="secret",
+                provider_id="google",
+                model="gemini-3.7-flash",
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                reasoning_effort=None,
+            ),
+            client=client,
+        )
+
+        list(provider.stream([{"role": "user", "content": "hello"}], []))
+
+        self.assertNotIn("extra_body", client.completions.request)
+
     def test_plain_summary_uses_unstructured_non_streaming_response(self) -> None:
         completions = _SummaryCompletions("Preserve app.py and rerun tests.")
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))

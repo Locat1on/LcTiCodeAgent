@@ -12,6 +12,7 @@ from uuid import uuid4
 class EventType(StrEnum):
     SESSION_STARTED = "session.started"
     SESSION_RESUMED = "session.resumed"
+    SESSION_RENAMED = "session.renamed"
     USER_MESSAGE = "user.message"
     ASSISTANT_DELTA = "assistant.delta"
     ASSISTANT_REASONING_DELTA = "assistant.reasoning_delta"

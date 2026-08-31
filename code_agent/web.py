@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import uvicorn
 from starlette.applications import Starlette
@@ -77,6 +79,7 @@ class WebAgent(Protocol):
 
 
 AgentFactory = Callable[[ApprovalHandler], WebAgent]
+ProviderAgentFactory = Callable[[str, ApprovalHandler, str | None], WebAgent]
 
 
 @dataclass(slots=True)
@@ -136,11 +139,13 @@ class WebSession:
         agent_factory: AgentFactory,
         *,
         session_id: str | None = None,
+        provider_id: str = "simulation",
     ) -> None:
         self.workspace = workspace.resolve()
         self.log = SessionLog(session_root, session_id=session_id)
         self.approvals = ApprovalBroker()
         self.agent = agent_factory(self.approvals.wait)
+        self.provider_id = provider_id
         self.references = WorkspaceReferences(self.workspace)
         self._cancel = threading.Event()
         self._resumed = session_id is not None
@@ -168,6 +173,7 @@ class WebSession:
                 {
                     "workspace": str(self.workspace),
                     "mode": self.agent.mode,
+                    "provider": self.provider_id,
                     "model": self.agent.model,
                     "sandbox": self.agent.sandbox,
                     "context_limit": self.agent.context_limit,
@@ -180,6 +186,7 @@ class WebSession:
             "session_id": self.log.session_id,
             "workspace": str(self.workspace),
             "mode": self.agent.mode,
+            "provider": self.provider_id,
             "model": self.agent.model,
             "reasoning_effort": getattr(
                 self.agent,
@@ -201,8 +208,6 @@ class WebSession:
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue[dict[str, Any] | None],
     ) -> None:
-        from uuid import uuid4
-
         self._cancel.clear()
         try:
             model_text = self.references.compose_model_text(
@@ -358,24 +363,57 @@ class WebRuntime:
         self,
         workspace: Path,
         session_root: Path,
-        agent_factory: AgentFactory,
+        provider_factory: ProviderAgentFactory,
+        provider_options: list[dict[str, Any]],
+        default_provider: str,
     ) -> None:
         self.workspace = workspace.resolve()
         self.session_root = session_root.resolve()
-        self.agent_factory = agent_factory
+        self.provider_factory = provider_factory
+        self.provider_options = provider_options
+        self.default_provider = default_provider
+        self._active_lock = threading.Lock()
+        self._active_sessions: dict[str, int] = {}
 
-    def create_session(self, session_id: str | None) -> WebSession:
+    def create_session(
+        self,
+        session_id: str | None,
+        provider_id: str | None = None,
+        model: str | None = None,
+    ) -> WebSession:
         if session_id is not None and not SESSION_ID_PATTERN.fullmatch(session_id):
             raise ValueError("invalid session id")
         if session_id is not None:
             path = self.session_root / f"{session_id}.jsonl"
             if not path.is_file():
                 raise ValueError("session log not found")
+            events = SessionLog(self.session_root, session_id=session_id).load()
+            if not events:
+                raise ValueError("session log is empty")
+            started = events[0].payload
+            provider_id = str(started.get("provider") or self.default_provider)
+            model = str(started.get("model") or model or "") or None
+        selected_provider = provider_id or self.default_provider
+        option = next(
+            (
+                item
+                for item in self.provider_options
+                if item["id"] == selected_provider and item["configured"]
+            ),
+            None,
+        )
+        if option is None:
+            raise ValueError("model provider is not configured")
+
+        def build(approval_handler: ApprovalHandler) -> WebAgent:
+            return self.provider_factory(selected_provider, approval_handler, model)
+
         return WebSession(
             self.workspace,
             self.session_root,
-            self.agent_factory,
+            build,
             session_id=session_id,
+            provider_id=selected_provider,
         )
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -392,34 +430,120 @@ class WebRuntime:
             except ValueError:
                 continue
             title = "新会话"
+            provider = str(events[0].payload.get("provider") or self.default_provider)
+            model = str(events[0].payload.get("model") or "")
             for event in events:
                 if event.event_type is EventType.USER_MESSAGE:
                     text = str(event.payload.get("text", "")).strip()
                     if text:
                         title = text[:42]
                         break
+            for event in events:
+                if event.event_type is EventType.SESSION_RENAMED:
+                    renamed = str(event.payload.get("title", "")).strip()
+                    if renamed:
+                        title = renamed
             sessions.append(
                 {
                     "session_id": session_id,
                     "title": title,
                     "events": len(events),
                     "updated": path.stat().st_mtime,
+                    "provider": provider,
+                    "model": model,
                 }
             )
         sessions.sort(key=lambda item: item["updated"], reverse=True)
         return sessions[:50]
+
+    def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
+        path = self._session_path(session_id)
+        normalized = title.strip()
+        if not normalized or len(normalized) > 80 or "\n" in normalized or "\r" in normalized:
+            raise ValueError("session title must be a single line of 1 to 80 characters")
+        log = SessionLog(self.session_root, session_id=session_id)
+        log.append(
+            AgentEvent.create(
+                EventType.SESSION_RENAMED,
+                session_id,
+                {"title": normalized},
+            )
+        )
+        return {"session_id": session_id, "title": normalized, "path": str(path)}
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        path = self._session_path(session_id)
+        with self._active_lock:
+            if self._active_sessions.get(session_id, 0):
+                raise RuntimeError("active session cannot be deleted")
+        trash = self.session_root / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        destination = trash / f"{session_id}-{uuid4().hex[:8]}.jsonl"
+        path.replace(destination)
+        return {
+            "session_id": session_id,
+            "deleted": True,
+            "recoverable": True,
+        }
+
+    def acquire_session(self, session_id: str) -> None:
+        with self._active_lock:
+            self._active_sessions[session_id] = self._active_sessions.get(session_id, 0) + 1
+
+    def release_session(self, session_id: str) -> None:
+        with self._active_lock:
+            remaining = self._active_sessions.get(session_id, 0) - 1
+            if remaining > 0:
+                self._active_sessions[session_id] = remaining
+            else:
+                self._active_sessions.pop(session_id, None)
+
+    def _session_path(self, session_id: str) -> Path:
+        if not SESSION_ID_PATTERN.fullmatch(session_id):
+            raise ValueError("invalid session id")
+        path = self.session_root / f"{session_id}.jsonl"
+        if not path.is_file():
+            raise ValueError("session log not found")
+        return path
 
 
 def create_web_app(
     workspace: Path,
     session_root: Path,
     agent_factory: AgentFactory | None = None,
+    *,
+    provider_factory: ProviderAgentFactory | None = None,
+    provider_options: list[dict[str, Any]] | None = None,
+    default_provider: str | None = None,
 ) -> Starlette:
     static_root = Path(__file__).with_name("web_static")
+    if provider_factory is None:
+        selected_factory = agent_factory or (lambda approval_handler: SimulatedAgent())
+
+        def provider_factory(
+            provider_id: str,
+            approval_handler: ApprovalHandler,
+            model: str | None,
+        ) -> WebAgent:
+            return selected_factory(approval_handler)
+
+    configured_options = provider_options or [
+        {
+            "id": "simulation",
+            "label": "离线模拟",
+            "configured": True,
+            "api_key_env": None,
+            "default_model": "simulated-local",
+            "models": ["simulated-local"],
+        }
+    ]
+    selected_default = default_provider or configured_options[0]["id"]
     runtime = WebRuntime(
         workspace,
         session_root,
-        agent_factory or (lambda approval_handler: SimulatedAgent()),
+        provider_factory,
+        configured_options,
+        selected_default,
     )
 
     async def index(request: Request) -> FileResponse:
@@ -428,19 +552,48 @@ def create_web_app(
     async def sessions(request: Request) -> JSONResponse:
         return JSONResponse({"sessions": runtime.list_sessions()})
 
+    async def providers(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "providers": runtime.provider_options,
+                "default_provider": runtime.default_provider,
+            }
+        )
+
+    async def session_operation(request: Request) -> JSONResponse:
+        if not _is_local_origin(request.headers.get("origin")):
+            return JSONResponse({"error": "non-local origin is not allowed"}, status_code=403)
+        session_id = request.path_params["session_id"]
+        try:
+            if request.method == "PATCH":
+                payload = await request.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("title"), str):
+                    raise ValueError("session title is required")
+                return JSONResponse(runtime.rename_session(session_id, payload["title"]))
+            return JSONResponse(runtime.delete_session(session_id))
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=404 if "not found" in str(error) else 400)
+        except RuntimeError as error:
+            return JSONResponse({"error": str(error)}, status_code=409)
+
     async def websocket_endpoint(websocket: WebSocket) -> None:
         if not _is_local_origin(websocket.headers.get("origin")):
             await websocket.close(code=1008)
             return
         session_id = websocket.query_params.get("session_id")
+        provider_id = websocket.query_params.get("provider")
+        model = websocket.query_params.get("model")
         try:
-            session = runtime.create_session(session_id)
+            session = runtime.create_session(session_id, provider_id, model)
             ready = session.start()
         except ValueError as error:
             await websocket.close(code=1008, reason=str(error))
             return
 
         await websocket.accept()
+        runtime.acquire_session(session.log.session_id)
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         await queue.put(ready)
         loop = asyncio.get_running_loop()
@@ -548,12 +701,19 @@ def create_web_app(
             pass
         finally:
             session.cancel()
+            runtime.release_session(session.log.session_id)
             await queue.put(None)
             await sender_task
 
     routes = [
         Route("/", index),
         Route("/api/sessions", sessions),
+        Route("/api/providers", providers),
+        Route(
+            "/api/sessions/{session_id}",
+            session_operation,
+            methods=["PATCH", "DELETE"],
+        ),
         WebSocketRoute("/ws", websocket_endpoint),
         Mount("/static", StaticFiles(directory=static_root), name="static"),
     ]
@@ -599,15 +759,34 @@ def _branch_name(workspace: Path) -> str:
     return branch or "—"
 
 
-def _live_agent_factory(workspace: Path) -> AgentFactory:
+def _live_provider_setup(
+    workspace: Path,
+) -> tuple[ProviderAgentFactory, list[dict[str, Any]], str]:
     from .command import CommandRunner
     from .live_agent import LiveAgent
-    from .openrouter import OpenRouterConfig, OpenRouterProvider
+    from .openrouter import (
+        OpenRouterConfig,
+        OpenRouterProvider,
+        provider_options_from_env,
+    )
     from .tools import ToolRegistry
 
-    config = OpenRouterConfig.from_env()
+    options = provider_options_from_env()
+    configured = [option for option in options if option["configured"]]
+    if not configured:
+        required = ", ".join(str(option["api_key_env"]) for option in options)
+        raise ValueError(f"no model provider is configured; set one of: {required}")
+    default_provider = next(
+        (option["id"] for option in configured if option["id"] == "openrouter"),
+        configured[0]["id"],
+    )
 
-    def build(approval_handler: ApprovalHandler) -> WebAgent:
+    def build(
+        provider_id: str,
+        approval_handler: ApprovalHandler,
+        model: str | None,
+    ) -> WebAgent:
+        config = OpenRouterConfig.for_provider(provider_id, model=model)
         command_runner = CommandRunner()
         return LiveAgent(
             OpenRouterProvider(config),
@@ -615,7 +794,7 @@ def _live_agent_factory(workspace: Path) -> AgentFactory:
             approval_handler=approval_handler,
         )
 
-    return build
+    return build, options, default_provider
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -639,14 +818,20 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
     try:
-        agent_factory = (
-            _live_agent_factory(args.workspace)
-            if args.live
-            else lambda approval_handler: SimulatedAgent()
-        )
+        provider_setup = _live_provider_setup(args.workspace) if args.live else None
     except ValueError as error:
         parser.error(str(error))
-    app = create_web_app(args.workspace, args.session_root, agent_factory)
+    if provider_setup is None:
+        app = create_web_app(args.workspace, args.session_root)
+    else:
+        provider_factory, options, default_provider = provider_setup
+        app = create_web_app(
+            args.workspace,
+            args.session_root,
+            provider_factory=provider_factory,
+            provider_options=options,
+            default_provider=default_provider,
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 

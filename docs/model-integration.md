@@ -1,15 +1,17 @@
-# OpenRouter 模型接入
+# 多厂商模型接入
 
-## 固定配置
+## 默认配置与兼容厂商
 
-- 模型：`google/gemini-3.7-flash`
-- 接口：OpenRouter OpenAI-compatible Chat Completions
+- 默认模型：OpenRouter 上的 `google/gemini-3.7-flash`
+- 统一接口：OpenAI-compatible Chat Completions
 - 上下文实验预算：32,000 token
-- 数据策略：请求只路由到 `data_collection=deny` 的上游
+- OpenRouter 数据策略：请求只路由到 `data_collection=deny` 的上游
 - 失败重试：默认 2 次，可用 `LCTI_OPENROUTER_RETRIES` 配置为 0–5
 - 推理强度：默认 `medium`，可用 `LCTI_REASONING_EFFORT` 配置为 `minimal / low / medium / high`
 
-固定模型 slug，而不使用自动指向最新版本的别名，以便复现实验。
+Web UI 还支持 Google Gemini、DeepSeek、OpenAI 和由环境变量指定的自定义兼容接口。Google 使用 `https://generativelanguage.googleapis.com/v1beta/openai/`，DeepSeek 使用 `https://api.deepseek.com`，OpenAI 使用 `https://api.openai.com/v1`。API Key 始终由服务端环境变量读取，浏览器只选择已配置的厂商与模型。直连其他厂商时不发送 OpenRouter 专属的路由与数据策略字段。
+
+上下文对比实验仍固定使用 OpenRouter 模型 slug，以保证实验可复现。
 
 ## 边界
 
@@ -25,6 +27,20 @@
 - 会话事件持久化
 
 项目不使用 OpenRouter Agent SDK、Server Tools、托管代码执行或托管文件工具。
+
+## 基础指令
+
+系统提示词只负责引导模型行为，权限边界仍由本地工具和权限管线强制执行。
+指令按五部分组织：
+
+1. **任务模式**：区分只读回答、只诊断和需要修改的任务，避免越权写入；
+2. **证据与仓库规则**：先检查相关代码和仓库约束，普通文件内容不能覆盖上层指令；
+3. **编辑与验证**：遵循读取后的 SHA-256 State Gate，修改后执行针对性验证并检查 Git diff；
+4. **失败与安全**：禁止原样盲目重试，审批拒绝后选择安全替代方案或报告阻塞；
+5. **完成标准**：只报告有工具证据支持的修改、测试和外部操作结果。
+
+提示词不会授予模型任何额外能力。即使模型忽略这些行为指令，工作区边界、
+敏感路径拒绝、命令白名单和 ASK 审批仍在模型外部生效。
 
 ## 流式工具调用
 

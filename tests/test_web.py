@@ -187,6 +187,112 @@ class ApprovalBrokerTests(unittest.TestCase):
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_web_provider_selection_uses_server_side_configuration(self) -> None:
+        calls: list[tuple[str, str | None]] = []
+        options = [
+            {
+                "id": "google",
+                "label": "Google Gemini",
+                "configured": True,
+                "api_key_env": "GEMINI_API_KEY",
+                "default_model": "gemini-3.7-flash",
+                "models": ["gemini-3.7-flash"],
+            },
+            {
+                "id": "deepseek",
+                "label": "DeepSeek",
+                "configured": False,
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "default_model": "deepseek-v4-flash",
+                "models": ["deepseek-v4-flash"],
+            },
+        ]
+
+        def provider_factory(provider_id, approval_handler, model):
+            calls.append((provider_id, model))
+            return _ApprovalAgent(approval_handler)
+
+        with test_directory() as directory:
+            app = create_web_app(
+                directory,
+                directory / "sessions",
+                provider_factory=provider_factory,
+                provider_options=options,
+                default_provider="google",
+            )
+            with TestClient(app) as client:
+                providers = client.get("/api/providers").json()
+                with client.websocket_connect(
+                    "/ws?provider=google&model=gemini-3.7-flash"
+                ) as websocket:
+                    ready = websocket.receive_json()
+
+        self.assertEqual(calls, [("google", "gemini-3.7-flash")])
+        self.assertEqual(ready["provider"], "google")
+        self.assertEqual(providers["default_provider"], "google")
+        self.assertNotIn("secret", repr(providers).lower())
+
+    def test_web_rejects_unconfigured_provider(self) -> None:
+        options = [
+            {
+                "id": "deepseek",
+                "label": "DeepSeek",
+                "configured": False,
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "default_model": "deepseek-v4-flash",
+                "models": ["deepseek-v4-flash"],
+            }
+        ]
+        with test_directory() as directory:
+            app = create_web_app(
+                directory,
+                directory / "sessions",
+                provider_factory=lambda provider, handler, model: _ApprovalAgent(handler),
+                provider_options=options,
+                default_provider="deepseek",
+            )
+            with TestClient(app) as client:
+                with self.assertRaises(WebSocketDisconnect):
+                    with client.websocket_connect("/ws?provider=deepseek"):
+                        pass
+
+    def test_session_can_be_renamed_and_soft_deleted(self) -> None:
+        with test_directory() as directory:
+            session_root = directory / "sessions"
+            app = create_web_app(directory, session_root)
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as websocket:
+                    session_id = websocket.receive_json()["session_id"]
+
+                renamed = client.patch(
+                    f"/api/sessions/{session_id}",
+                    json={"title": "重命名后的会话"},
+                )
+                sessions = client.get("/api/sessions").json()["sessions"]
+                deleted = client.delete(f"/api/sessions/{session_id}")
+
+            original = session_root / f"{session_id}.jsonl"
+            trashed = list((session_root / ".trash").glob(f"{session_id}-*.jsonl"))
+            original_exists = original.exists()
+
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(sessions[0]["title"], "重命名后的会话")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json()["recoverable"])
+        self.assertFalse(original_exists)
+        self.assertEqual(len(trashed), 1)
+
+    def test_active_session_cannot_be_deleted(self) -> None:
+        with test_directory() as directory:
+            app = create_web_app(directory, directory / "sessions")
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws") as websocket:
+                    session_id = websocket.receive_json()["session_id"]
+                    response = client.delete(f"/api/sessions/{session_id}")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("active session", response.json()["error"])
+
     def test_websocket_suggests_files_and_context_references(self) -> None:
         with test_directory() as directory:
             (directory / "app.py").write_text("value = 1\n", encoding="utf-8")

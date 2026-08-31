@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from openai import OpenAI, OpenAIError
@@ -26,6 +27,7 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 RETRY_BASE_SECONDS = 0.5
 RETRYABLE_STATUS_CODES = {408, 409, 429}
 REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 PLAIN_SUMMARY_PROMPT = """Summarize the older coding-agent conversation for continuation.
 Preserve the user objective, constraints, files, identifiers, completed work, command
 outcomes, errors, and next actions. Return concise plain text. Do not use JSON.
@@ -45,15 +47,114 @@ class _ProviderFinishError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderSpec:
+    provider_id: str
+    label: str
+    api_key_env: str
+    base_url: str
+    model_env: str
+    default_model: str
+    models: tuple[str, ...]
+    reasoning_mode: str | None = None
+    base_url_env: str | None = None
+
+
+PROVIDER_SPECS: dict[str, ProviderSpec] = {
+    spec.provider_id: spec
+    for spec in (
+        ProviderSpec(
+            "openrouter",
+            "OpenRouter",
+            "OPENROUTER_API_KEY",
+            DEFAULT_BASE_URL,
+            "LCTI_MODEL",
+            DEFAULT_MODEL,
+            (DEFAULT_MODEL,),
+            reasoning_mode="openrouter",
+        ),
+        ProviderSpec(
+            "google",
+            "Google Gemini",
+            "GEMINI_API_KEY",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "LCTI_GOOGLE_MODEL",
+            "gemini-3.7-flash",
+            ("gemini-3.7-flash",),
+        ),
+        ProviderSpec(
+            "deepseek",
+            "DeepSeek",
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com",
+            "LCTI_DEEPSEEK_MODEL",
+            "deepseek-v4-flash",
+            ("deepseek-v4-flash", "deepseek-v4-pro"),
+            reasoning_mode="deepseek",
+        ),
+        ProviderSpec(
+            "openai",
+            "OpenAI",
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1",
+            "LCTI_OPENAI_MODEL",
+            "gpt-5.2",
+            ("gpt-5.2",),
+        ),
+        ProviderSpec(
+            "compatible",
+            "自定义 OpenAI-compatible",
+            "LCTI_COMPAT_API_KEY",
+            "",
+            "LCTI_COMPAT_MODEL",
+            "",
+            (),
+            base_url_env="LCTI_COMPAT_BASE_URL",
+        ),
+    )
+}
+
+
+def provider_options_from_env(
+    env: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    values = env if env is not None else os.environ
+    options: list[dict[str, Any]] = []
+    for spec in PROVIDER_SPECS.values():
+        model = values.get(spec.model_env, "").strip() or spec.default_model
+        base_url = (
+            values.get(spec.base_url_env, "").strip()
+            if spec.base_url_env
+            else spec.base_url
+        )
+        configured = bool(
+            values.get(spec.api_key_env, "").strip()
+            and model
+            and base_url.startswith("https://")
+        )
+        options.append(
+            {
+                "id": spec.provider_id,
+                "label": spec.label,
+                "configured": configured,
+                "api_key_env": spec.api_key_env,
+                "default_model": model,
+                "models": list(dict.fromkeys((model, *spec.models))) if model else list(spec.models),
+            }
+        )
+    return options
+
+
+@dataclass(frozen=True, slots=True)
 class OpenRouterConfig:
     api_key: str = field(repr=False)
+    provider_id: str = "openrouter"
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
     context_budget: int = 32_000
     timeout_seconds: float = 60.0
     max_steps: int = 16
     max_retries: int = 2
-    reasoning_effort: str = "medium"
+    reasoning_effort: str | None = "medium"
     compaction_strategy: CompactionStrategy = CompactionStrategy.VALIDATED
 
     @classmethod
@@ -123,6 +224,44 @@ class OpenRouterConfig:
             compaction_strategy=compaction_strategy,
         )
 
+    @classmethod
+    def for_provider(
+        cls,
+        provider_id: str,
+        *,
+        model: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> OpenRouterConfig:
+        values = env if env is not None else os.environ
+        spec = PROVIDER_SPECS.get(provider_id)
+        if spec is None:
+            raise OpenRouterConfigurationError("unknown model provider")
+        api_key = values.get(spec.api_key_env, "").strip()
+        if not api_key:
+            raise OpenRouterConfigurationError(
+                f"{spec.api_key_env} is not set; provide it through the environment"
+            )
+        selected_model = (model or values.get(spec.model_env, "") or spec.default_model).strip()
+        if not MODEL_PATTERN.fullmatch(selected_model):
+            raise OpenRouterConfigurationError("model name is invalid")
+        base_url = (
+            values.get(spec.base_url_env, "").strip()
+            if spec.base_url_env
+            else spec.base_url
+        )
+        prepared = dict(values)
+        prepared["OPENROUTER_API_KEY"] = api_key
+        prepared["LCTI_MODEL"] = selected_model
+        prepared["LCTI_BASE_URL"] = base_url
+        config = cls.from_env(prepared)
+        return replace(
+            config,
+            provider_id=provider_id,
+            reasoning_effort=(
+                config.reasoning_effort if spec.reasoning_mode else None
+            ),
+        )
+
 
 class OpenRouterProvider:
     def __init__(
@@ -134,12 +273,17 @@ class OpenRouterProvider:
     ) -> None:
         self.config = config
         self._sleep = sleep_fn
-        self._client = client or OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            timeout=config.timeout_seconds,
-            max_retries=0,
-        )
+        client_options: dict[str, Any] = {
+            "api_key": config.api_key,
+            "base_url": config.base_url,
+            "timeout": config.timeout_seconds,
+            "max_retries": 0,
+        }
+        if config.provider_id == "google":
+            client_options["default_headers"] = {
+                "x-goog-api-client": "lcticodeagent-oai/0.1.0"
+            }
+        self._client = client or OpenAI(**client_options)
 
     def stream(
         self,
@@ -151,24 +295,19 @@ class OpenRouterProvider:
             finish_reason: str | None = None
             output_emitted = False
             try:
+                request: dict[str, Any] = {
+                    "model": self.config.model,
+                    "messages": list(messages),
+                    "tools": list(tools),
+                    "tool_choice": "auto",
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if self.config.provider_id != "openai":
+                    request["temperature"] = 0.2
+                request.update(self._provider_request_options())
                 stream = self._client.chat.completions.create(
-                    model=self.config.model,
-                    messages=list(messages),
-                    tools=list(tools),
-                    tool_choice="auto",
-                    temperature=0.2,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    extra_body={
-                        "provider": {
-                            "require_parameters": True,
-                            "data_collection": "deny",
-                        },
-                        "reasoning": {
-                            "effort": self.config.reasoning_effort,
-                            "exclude": False,
-                        },
-                    },
+                    **request,
                 )
                 for chunk in stream:
                     usage = getattr(chunk, "usage", None)
@@ -184,7 +323,9 @@ class OpenRouterProvider:
                         )
                     for choice in chunk.choices:
                         delta = choice.delta
-                        raw_reasoning = getattr(delta, "reasoning", None)
+                        raw_reasoning = getattr(delta, "reasoning", None) or getattr(
+                            delta, "reasoning_content", None
+                        )
                         raw_details = getattr(delta, "reasoning_details", None) or []
                         details = tuple(
                             _normalize_reasoning_detail(detail)
@@ -253,6 +394,27 @@ class OpenRouterProvider:
             )
             return
 
+    def _provider_request_options(self) -> dict[str, Any]:
+        if self.config.provider_id == "openrouter":
+            return {
+                "extra_body": {
+                    "provider": {
+                        "require_parameters": True,
+                        "data_collection": "deny",
+                    },
+                    "reasoning": {
+                        "effort": self.config.reasoning_effort,
+                        "exclude": False,
+                    },
+                }
+            }
+        if self.config.provider_id == "deepseek":
+            return {
+                "reasoning_effort": self.config.reasoning_effort,
+                "extra_body": {"thinking": {"type": "enabled"}},
+            }
+        return {}
+
     def summarize_context(
         self,
         messages: Sequence[dict[str, Any]],
@@ -262,9 +424,9 @@ class OpenRouterProvider:
         response = None
         for attempt in range(self.config.max_retries + 1):
             try:
-                response = self._client.chat.completions.create(
-                    model=self.config.model,
-                    messages=[
+                request: dict[str, Any] = {
+                    "model": self.config.model,
+                    "messages": [
                         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                         {
                             "role": "user",
@@ -278,15 +440,20 @@ class OpenRouterProvider:
                             ),
                         },
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    stream=False,
-                    extra_body={
+                    "response_format": {"type": "json_object"},
+                    "stream": False,
+                }
+                if self.config.provider_id != "openai":
+                    request["temperature"] = 0
+                if self.config.provider_id == "openrouter":
+                    request["extra_body"] = {
                         "provider": {
                             "require_parameters": True,
                             "data_collection": "deny",
                         }
-                    },
+                    }
+                response = self._client.chat.completions.create(
+                    **request,
                 )
                 choice = response.choices[0]
                 if getattr(choice, "finish_reason", None) == "error":

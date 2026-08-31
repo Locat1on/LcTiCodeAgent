@@ -29,6 +29,16 @@ $env:OPENROUTER_API_KEY = "..."
 
 默认地址为 `http://127.0.0.1:8765`。`--host` 只接受 `127.0.0.1`、`localhost` 或 `::1`，不提供公网监听入口。
 
+### 模型厂商选择
+
+顶部模型区域打开厂商与模型面板。Web UI 支持 OpenRouter、Google Gemini、DeepSeek、OpenAI 和自定义 OpenAI-compatible 接口，只允许选择服务端环境中已经配置密钥的厂商。API Key 不会通过 `/api/providers` 返回，不写入浏览器存储或 Session 日志；接口只返回厂商名称、可用状态、模型候选和所需环境变量名称。
+
+切换厂商或模型会创建新会话。`session.started` 记录非敏感的厂商 ID 与模型名，恢复会话时自动重建原 Provider，避免跨厂商混用 reasoning detail 或 tool-call 状态。
+
+### 会话操作
+
+会话行右侧菜单支持重命名和删除。重命名通过追加 `session.renamed` 事件实现，不改写历史 JSONL；列表以最新重命名事件为准。删除将日志移动到 `sessions/.trash/`，因此仍可人工恢复。仍有 WebSocket 连接的会话拒绝删除，用户需先切换到其他会话。
+
 ## 事件桥
 
 `LiveAgent` 是同步生成器。Web 服务把一个 turn 放入工作线程，通过 `asyncio.Queue` 把已存在的 `AgentEvent` 送回 WebSocket。浏览器不直接访问模型 Provider，也不能调用本地工具。

@@ -21,11 +21,11 @@
             <span class="meta-label">工作区</span>
             <code id="workspacePath">连接中…</code>
           </div>
-          <div class="meta-item">
+          <button class="meta-item model-meta" id="providerSettingsButton" type="button" aria-label="选择模型厂商和模型">
             <span class="meta-icon sparkle" aria-hidden="true">✦</span>
             <span class="meta-label">模型</span>
             <span id="modelName">—</span>
-          </div>
+          </button>
           <div class="meta-item">
             <span class="meta-icon shield" aria-hidden="true">◇</span>
             <span class="meta-label">沙箱</span>
@@ -40,8 +40,9 @@
           </div>
         </div>
         <div class="topbar-actions">
-          <button class="icon-button mobile-only" id="sessionsToggle" type="button" aria-label="打开会话列表">☰</button>
-          <button class="icon-button mobile-only" id="inspectorToggle" type="button" aria-label="打开检查器">◫</button>
+          <button class="icon-button provider-compact" id="providerSettingsCompact" type="button" aria-label="模型配置">⚙</button>
+          <button class="icon-button sessions-toggle" id="sessionsToggle" type="button" aria-label="打开会话列表" aria-expanded="false">☰</button>
+          <button class="icon-button inspector-toggle" id="inspectorToggle" type="button" aria-label="打开检查器" aria-expanded="false">◫</button>
         </div>
       </header>
 
@@ -51,10 +52,6 @@
           <button class="add-session" id="newSession" type="button" aria-label="新建会话">＋</button>
         </div>
         <nav class="session-list" id="sessionList"></nav>
-        <div class="rail-footer">
-          <button class="icon-button" type="button" aria-label="设置">⚙</button>
-          <button class="icon-button" type="button" aria-label="帮助">?</button>
-        </div>
       </aside>
 
       <main class="workspace">
@@ -70,7 +67,6 @@
 
         <section class="activity" id="activity" aria-live="polite" aria-label="Agent 活动记录">
           <div class="welcome" id="welcome">
-            <img src="/static/mascot.png" alt="蓝色代码助手" />
             <div>
               <h2>从一个真实任务开始</h2>
               <p>描述你希望检查、修改或验证的代码。工具执行和证据会沿着任务路径依次出现。</p>
@@ -162,6 +158,43 @@
       <form method="dialog"><button aria-label="关闭">×</button></form>
       <h2>原始事件</h2>
       <pre id="recallContent"></pre>
+    </dialog>
+
+    <dialog class="settings-dialog session-dialog" id="sessionDialog">
+      <form id="sessionForm">
+        <div class="dialog-heading">
+          <div><h2>会话设置</h2><p id="sessionDialogMeta"></p></div>
+          <button class="dialog-close" id="sessionDialogClose" type="button" aria-label="关闭">×</button>
+        </div>
+        <label for="sessionTitleInput">会话名称</label>
+        <input id="sessionTitleInput" maxlength="80" required />
+        <div class="dialog-actions">
+          <button class="danger-button" id="deleteSession" type="button">删除会话</button>
+          <span class="dialog-spacer"></span>
+          <button class="secondary-button" id="cancelSessionEdit" type="button">取消</button>
+          <button class="primary-button" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="settings-dialog provider-dialog" id="providerDialog">
+      <form id="providerForm">
+        <div class="dialog-heading">
+          <div><h2>模型配置</h2><p>密钥仅从服务端环境变量读取</p></div>
+          <button class="dialog-close" id="providerDialogClose" type="button" aria-label="关闭">×</button>
+        </div>
+        <label for="providerSelect">API 厂商</label>
+        <select id="providerSelect"></select>
+        <label for="providerModelInput">模型名称</label>
+        <input id="providerModelInput" maxlength="200" list="providerModels" autocomplete="off" />
+        <datalist id="providerModels"></datalist>
+        <p class="provider-hint" id="providerHint"></p>
+        <div class="dialog-actions">
+          <span class="dialog-spacer"></span>
+          <button class="secondary-button" id="cancelProviderEdit" type="button">取消</button>
+          <button class="primary-button" id="applyProvider" type="submit">应用并新建会话</button>
+        </div>
+      </form>
     </dialog>
 
     <script src="/static/app.js" defer></script>
