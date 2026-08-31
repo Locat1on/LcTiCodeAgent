@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from openai import OpenAI, OpenAIError
 
+from .context import CompactionStrategy
 from .model import (
     ModelEvent,
     ModelEventType,
@@ -25,6 +26,10 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 RETRY_BASE_SECONDS = 0.5
 RETRYABLE_STATUS_CODES = {408, 409, 429}
 REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+PLAIN_SUMMARY_PROMPT = """Summarize the older coding-agent conversation for continuation.
+Preserve the user objective, constraints, files, identifiers, completed work, command
+outcomes, errors, and next actions. Return concise plain text. Do not use JSON.
+"""
 
 
 class OpenRouterConfigurationError(ValueError):
@@ -49,6 +54,7 @@ class OpenRouterConfig:
     max_steps: int = 16
     max_retries: int = 2
     reasoning_effort: str = "medium"
+    compaction_strategy: CompactionStrategy = CompactionStrategy.VALIDATED
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> OpenRouterConfig:
@@ -97,6 +103,15 @@ class OpenRouterConfig:
             raise OpenRouterConfigurationError(
                 "LCTI_REASONING_EFFORT must be minimal, low, medium, or high"
             )
+        try:
+            compaction_strategy = CompactionStrategy(
+                values.get("LCTI_COMPACTION_STRATEGY", "validated").strip()
+            )
+        except ValueError as error:
+            raise OpenRouterConfigurationError(
+                "LCTI_COMPACTION_STRATEGY must be none, drop_oldest, "
+                "plain_summary, or validated"
+            ) from error
         return cls(
             api_key=api_key,
             model=model,
@@ -105,6 +120,7 @@ class OpenRouterConfig:
             max_steps=max_steps,
             max_retries=max_retries,
             reasoning_effort=reasoning_effort,
+            compaction_strategy=compaction_strategy,
         )
 
 
@@ -290,6 +306,54 @@ class OpenRouterProvider:
         if not isinstance(parsed, dict):
             raise OpenRouterRequestError("OpenRouter summary response was not an object")
         return parsed
+
+    def summarize_context_plain(
+        self,
+        messages: Sequence[dict[str, Any]],
+    ) -> str:
+        response = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": PLAIN_SUMMARY_PROMPT},
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {"source_messages": list(messages)},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    ],
+                    temperature=0,
+                    stream=False,
+                    extra_body={
+                        "provider": {
+                            "require_parameters": True,
+                            "data_collection": "deny",
+                        }
+                    },
+                )
+                choice = response.choices[0]
+                if getattr(choice, "finish_reason", None) == "error":
+                    raise _ProviderFinishError("finish_reason=error")
+                break
+            except (OpenAIError, _ProviderFinishError) as error:
+                if self._should_retry(error, attempt, output_emitted=False):
+                    self._sleep(RETRY_BASE_SECONDS * (2**attempt))
+                    continue
+                raise self._normalized_error("plain summary request", error) from error
+        try:
+            content = response.choices[0].message.content
+        except (AttributeError, IndexError, TypeError) as error:
+            raise OpenRouterRequestError(
+                "OpenRouter plain summary response was malformed"
+            ) from error
+        if not isinstance(content, str) or not content.strip():
+            raise OpenRouterRequestError("OpenRouter plain summary response was empty")
+        return content.strip()
 
     def _should_retry(
         self,

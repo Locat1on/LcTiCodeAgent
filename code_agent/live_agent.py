@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
-from .context import ContextManager
+from .context import CompactionStrategy, ContextManager
 from .events import AgentEvent, EventType
 from .model import ModelEventType, ModelToolCall, ToolCallParseError
 from .openrouter import OpenRouterProvider, OpenRouterRequestError
@@ -63,6 +63,13 @@ class LiveAgent:
             provider.config,
             "reasoning_effort",
             None,
+        )
+        self.compaction_strategy = CompactionStrategy(
+            getattr(
+                provider.config,
+                "compaction_strategy",
+                CompactionStrategy.VALIDATED,
+            )
         )
         self.tools = tools
         self.sandbox = tools.command_runner.mode
@@ -278,8 +285,28 @@ class LiveAgent:
         )
 
     def compact_context(self, session_id: str) -> Iterator[AgentEvent]:
-        yield from self._emit_compaction(session_id, None, None, trigger="manual")
-        if self._context.estimated_tokens > self._summary_target:
+        if self.compaction_strategy is CompactionStrategy.NONE:
+            yield from self._emit_disabled_compaction(session_id, trigger="manual")
+        elif self.compaction_strategy is CompactionStrategy.DROP_OLDEST:
+            yield from self._emit_drop_oldest(
+                session_id,
+                None,
+                None,
+                trigger="manual",
+            )
+        elif self.compaction_strategy is CompactionStrategy.PLAIN_SUMMARY:
+            yield from self._emit_plain_summary(
+                session_id,
+                None,
+                None,
+                trigger="manual",
+            )
+        else:
+            yield from self._emit_compaction(session_id, None, None, trigger="manual")
+        if (
+            self.compaction_strategy is CompactionStrategy.VALIDATED
+            and self._context.estimated_tokens > self._summary_target
+        ):
             yield from self._emit_structured_compaction(
                 session_id,
                 None,
@@ -291,6 +318,7 @@ class LiveAgent:
         stats = self._context.layer_stats()
         stats["used_tokens"] = self.used_tokens
         stats["limit_tokens"] = self.context_limit
+        stats["compaction_strategy"] = self.compaction_strategy.value
         memory = self._context.working_memory
         stats["working_memory"] = {
             "modified_files": len(memory.modified_files),
@@ -306,6 +334,26 @@ class LiveAgent:
         step_id: str,
     ) -> Iterator[AgentEvent]:
         before = self._context.estimated_tokens
+        if self.compaction_strategy is CompactionStrategy.NONE:
+            return
+        if self.compaction_strategy is CompactionStrategy.DROP_OLDEST:
+            if before > self._summary_threshold:
+                yield from self._emit_drop_oldest(
+                    session_id,
+                    turn_id,
+                    step_id,
+                    trigger="threshold",
+                )
+            return
+        if self.compaction_strategy is CompactionStrategy.PLAIN_SUMMARY:
+            if before > self._summary_threshold:
+                yield from self._emit_plain_summary(
+                    session_id,
+                    turn_id,
+                    step_id,
+                    trigger="threshold",
+                )
+            return
         if before <= self._compaction_threshold:
             return
         yield from self._emit_compaction(
@@ -314,7 +362,10 @@ class LiveAgent:
             step_id,
             trigger="threshold",
         )
-        if before > self._summary_threshold and self._context.estimated_tokens > self._summary_target:
+        if (
+            before > self._summary_threshold
+            and self._context.estimated_tokens > self._summary_target
+        ):
             yield from self._emit_structured_compaction(
                 session_id,
                 turn_id,
@@ -348,6 +399,175 @@ class LiveAgent:
             EventType.CONTEXT_COMPACTION_COMPLETED,
             session_id,
             payload,
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+
+    def _emit_disabled_compaction(
+        self,
+        session_id: str,
+        *,
+        trigger: str,
+    ) -> Iterator[AgentEvent]:
+        tokens = self._context.estimated_tokens
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": CompactionStrategy.NONE.value,
+                "changed": False,
+                "before_tokens": tokens,
+                "after_tokens": tokens,
+                "items_pruned": 0,
+                "rules": {},
+                "pruned_event_ids": [],
+                "target_tokens": self._summary_target,
+                "target_met": tokens <= self._summary_target,
+            },
+        )
+
+    def _emit_drop_oldest(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        step_id: str | None,
+        *,
+        trigger: str,
+    ) -> Iterator[AgentEvent]:
+        before = self._context.estimated_tokens
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_STARTED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": CompactionStrategy.DROP_OLDEST.value,
+                "estimated_tokens": before,
+                "limit_tokens": self.context_limit,
+                "target_tokens": self._summary_target,
+            },
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+        report = self._context.drop_oldest(
+            self._summary_target,
+            trigger=trigger,
+        )
+        payload = report.to_payload()
+        payload.update(
+            {
+                "strategy": CompactionStrategy.DROP_OLDEST.value,
+                "target_tokens": self._summary_target,
+                "target_met": report.after_tokens <= self._summary_target,
+            }
+        )
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            payload,
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+
+    def _emit_plain_summary(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        step_id: str | None,
+        *,
+        trigger: str,
+    ) -> Iterator[AgentEvent]:
+        summarize = getattr(self.provider, "summarize_context_plain", None)
+        source_messages, event_ids, source_items, source_tokens = (
+            self._context.summary_source()
+        )
+        before = self._context.estimated_tokens
+        if not callable(summarize) or not source_messages:
+            yield from self._emit_plain_summary_result(
+                session_id,
+                turn_id,
+                step_id,
+                trigger=trigger,
+                before=before,
+                error="plain summary source is unavailable",
+            )
+            return
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_STARTED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": CompactionStrategy.PLAIN_SUMMARY.value,
+                "estimated_tokens": before,
+                "limit_tokens": self.context_limit,
+                "target_tokens": self._summary_target,
+                "source_items": source_items,
+                "source_tokens": source_tokens,
+            },
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+        try:
+            summary = summarize(source_messages)
+            removed, _, after = self._context.apply_plain_summary(summary)
+        except (OpenRouterRequestError, TypeError, ValueError) as error:
+            yield from self._emit_plain_summary_result(
+                session_id,
+                turn_id,
+                step_id,
+                trigger=trigger,
+                before=before,
+                error=f"{type(error).__name__}: {str(error)[:300]}",
+            )
+            return
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": CompactionStrategy.PLAIN_SUMMARY.value,
+                "changed": True,
+                "before_tokens": before,
+                "after_tokens": after,
+                "items_pruned": removed,
+                "rules": {"plain_summary": removed},
+                "pruned_event_ids": list(event_ids),
+                "validation": "not_checked",
+                "summary": summary,
+                "target_tokens": self._summary_target,
+                "target_met": after <= self._summary_target,
+            },
+            turn_id=turn_id,
+            step_id=step_id,
+        )
+
+    def _emit_plain_summary_result(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        step_id: str | None,
+        *,
+        trigger: str,
+        before: int,
+        error: str,
+    ) -> Iterator[AgentEvent]:
+        yield AgentEvent.create(
+            EventType.CONTEXT_COMPACTION_COMPLETED,
+            session_id,
+            {
+                "trigger": trigger,
+                "strategy": CompactionStrategy.PLAIN_SUMMARY.value,
+                "changed": False,
+                "before_tokens": before,
+                "after_tokens": self._context.estimated_tokens,
+                "items_pruned": 0,
+                "rules": {},
+                "pruned_event_ids": [],
+                "validation": "not_checked",
+                "error": error,
+                "target_tokens": self._summary_target,
+                "target_met": self._context.estimated_tokens <= self._summary_target,
+            },
             turn_id=turn_id,
             step_id=step_id,
         )

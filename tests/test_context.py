@@ -5,6 +5,7 @@ import unittest
 from typing import Any
 
 from code_agent.context import (
+    CompactionStrategy,
     ContextLayer,
     ContextManager,
     TokenCounter,
@@ -106,6 +107,63 @@ class TokenCounterTests(unittest.TestCase):
 
 
 class ContextProjectionTests(unittest.TestCase):
+    def test_plain_summary_replaces_only_old_complete_turns(self) -> None:
+        manager = ContextManager("SYS")
+        manager.add_user("old task " * 100)
+        manager.add_assistant("old answer " * 100)
+        manager.add_user("current task")
+
+        removed, before, after = manager.apply_plain_summary("plain summary")
+
+        messages = manager.messages()
+        self.assertEqual(removed, 2)
+        self.assertLess(after, before)
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "system", "user"],
+        )
+        self.assertIn("plain context summary", messages[1]["content"])
+        self.assertEqual(messages[-1]["content"], "current task")
+
+    def test_drop_oldest_removes_whole_tool_call_turn(self) -> None:
+        manager = ContextManager("SYS")
+        manager.add_user("old task " * 300)
+        manager.add_assistant(
+            "",
+            [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        )
+        manager.add_tool(
+            call_id="call-1",
+            tool_name="read_file",
+            arguments={},
+            content=_envelope("large evidence " * 300),
+        )
+        manager.add_user("current task")
+
+        report = manager.drop_oldest(50, trigger="manual")
+
+        messages = manager.messages()
+        self.assertTrue(report.changed)
+        self.assertEqual(report.trigger, "manual")
+        self.assertEqual(report.rules, {"drop_oldest_turn": 1})
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "user"],
+        )
+        self.assertFalse(any(message.get("tool_calls") for message in messages))
+
+    def test_compaction_strategy_values_are_stable(self) -> None:
+        self.assertEqual(
+            [strategy.value for strategy in CompactionStrategy],
+            ["none", "drop_oldest", "plain_summary", "validated"],
+        )
+
     def test_reasoning_details_are_preserved_in_assistant_messages(self) -> None:
         manager = ContextManager("SYS")
         details = [

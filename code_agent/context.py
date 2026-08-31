@@ -20,6 +20,7 @@ from uuid import uuid4
 PRUNED_PREFIX = "[pruned"
 DUPLICATE_PREFIX = "[duplicate"
 SUMMARY_PREFIX = "[validated context summary]\n"
+PLAIN_SUMMARY_PREFIX = "[plain context summary - unvalidated]\n"
 MIN_PRUNE_CHARS = 400
 COMMAND_OUTCOME_TOOLS = {"run_command", "git_status", "git_diff", "git_log"}
 KEEP_STDOUT_TAIL = 400
@@ -34,6 +35,13 @@ class ContextLayer(StrEnum):
     PINNED = "pinned"
     RECENT = "recent"
     EVIDENCE = "evidence"
+
+
+class CompactionStrategy(StrEnum):
+    NONE = "none"
+    DROP_OLDEST = "drop_oldest"
+    PLAIN_SUMMARY = "plain_summary"
+    VALIDATED = "validated"
 
 
 class TokenCounter:
@@ -544,6 +552,68 @@ class ContextManager:
         self.refresh_state()
         return len(indices), before, self.estimated_tokens
 
+    def apply_plain_summary(self, summary: str) -> tuple[int, int, int]:
+        self._refresh_layers()
+        indices = self._summary_candidate_indices()
+        if not indices:
+            return 0, self.estimated_tokens, self.estimated_tokens
+        before = self.estimated_tokens
+        summary_item = self._build_item(
+            "system",
+            PLAIN_SUMMARY_PREFIX + summary.strip(),
+            ContextLayer.PINNED,
+            tool_name="plain_context_summary",
+            pruned=True,
+        )
+        selected = set(indices)
+        retained = [
+            item for index, item in enumerate(self._items) if index not in selected
+        ]
+        retained.insert(1, summary_item)
+        self._items = retained
+        self.refresh_state()
+        return len(indices), before, self.estimated_tokens
+
+    def drop_oldest(
+        self,
+        target_tokens: int,
+        *,
+        trigger: str = "threshold",
+    ) -> CompactionReport:
+        if not isinstance(target_tokens, int) or target_tokens < 1:
+            raise ValueError("target_tokens must be a positive integer")
+        self._refresh_layers()
+        before = self.estimated_tokens
+        groups = self._evidence_groups()
+        removed: set[int] = set()
+        removed_groups = 0
+        for group in groups:
+            if self.estimated_tokens - sum(
+                self._items[index].tokens for index in removed
+            ) <= target_tokens:
+                break
+            removed.update(group)
+            removed_groups += 1
+        event_ids = tuple(
+            item.source_event_id
+            for index, item in enumerate(self._items)
+            if index in removed and item.source_event_id
+        )
+        if removed:
+            self._items = [
+                item for index, item in enumerate(self._items) if index not in removed
+            ]
+            self.refresh_state()
+        return CompactionReport(
+            trigger=trigger,
+            changed=bool(removed),
+            before_tokens=before,
+            after_tokens=self.estimated_tokens,
+            items_pruned=len(removed),
+            rules={"drop_oldest_turn": removed_groups},
+            pruned_event_ids=event_ids,
+        )
+
     @property
     def item_count(self) -> int:
         return len(self._items)
@@ -664,9 +734,23 @@ class ContextManager:
             if index > 0
             and (
                 item.layer is ContextLayer.EVIDENCE
-                or item.tool_name == "context_summary"
+                or item.tool_name in {"context_summary", "plain_context_summary"}
             )
         ]
+
+    def _evidence_groups(self) -> list[list[int]]:
+        candidates = self._summary_candidate_indices()
+        groups: list[list[int]] = []
+        current: list[int] = []
+        for index in candidates:
+            item = self._items[index]
+            if item.role == "user" and current:
+                groups.append(current)
+                current = []
+            current.append(index)
+        if current:
+            groups.append(current)
+        return groups
 
     def _collect_working_memory(self) -> None:
         memory = WorkingMemory()

@@ -178,6 +178,100 @@ def _run_session(agent: LiveAgent, log: SessionLog, prompts: list[str]) -> None:
 
 
 class RestoreTests(unittest.TestCase):
+    def test_restore_replays_plain_summary_strategy(self) -> None:
+        session_id = "plain-summary-session"
+        events = [
+            AgentEvent.create(EventType.SESSION_STARTED, session_id, {}),
+            AgentEvent.create(
+                EventType.USER_MESSAGE,
+                session_id,
+                {"text": "old task " * 100},
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "old answer " * 100, "tool_calls": None},
+            ),
+            AgentEvent.create(
+                EventType.USER_MESSAGE,
+                session_id,
+                {"text": "current task"},
+            ),
+            AgentEvent.create(
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+                session_id,
+                {
+                    "strategy": "plain_summary",
+                    "changed": True,
+                    "summary": "plain summary",
+                },
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "current answer", "tool_calls": None},
+            ),
+        ]
+
+        with test_directory() as workspace:
+            agent = LiveAgent(_TextProvider(), ToolRegistry(workspace))
+            agent.restore(events)
+
+        messages = agent._context.messages()
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "system", "user", "assistant"],
+        )
+        self.assertIn("plain context summary", messages[1]["content"])
+        self.assertNotIn("old task", str(messages))
+
+    def test_restore_replays_drop_oldest_strategy(self) -> None:
+        session_id = "drop-oldest-session"
+        events = [
+            AgentEvent.create(EventType.SESSION_STARTED, session_id, {}),
+            AgentEvent.create(
+                EventType.USER_MESSAGE,
+                session_id,
+                {"text": "old task " * 500},
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "old answer " * 500, "tool_calls": None},
+            ),
+            AgentEvent.create(
+                EventType.USER_MESSAGE,
+                session_id,
+                {"text": "current task"},
+            ),
+            AgentEvent.create(
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+                session_id,
+                {
+                    "strategy": "drop_oldest",
+                    "changed": True,
+                    "target_tokens": 100,
+                    "trigger": "threshold",
+                },
+            ),
+            AgentEvent.create(
+                EventType.ASSISTANT_MESSAGE,
+                session_id,
+                {"text": "current answer", "tool_calls": None},
+            ),
+        ]
+
+        with test_directory() as workspace:
+            agent = LiveAgent(_TextProvider(), ToolRegistry(workspace))
+            agent.restore(events)
+
+        messages = agent._context.messages()
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "user", "assistant"],
+        )
+        self.assertNotIn("old task", str(messages))
+
     def test_restore_uses_composed_model_text_for_referenced_user_message(self) -> None:
         session_id = "referenced-session"
         events = [

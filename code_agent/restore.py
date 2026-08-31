@@ -134,6 +134,21 @@ def project_session(
                 source_messages, event_ids, _, _ = context.summary_source()
                 validate_summary(summary, source_messages, event_ids)
                 context.apply_structured_summary(summary)
+            elif (
+                event.event_type is EventType.CONTEXT_COMPACTION_COMPLETED
+                and event.payload.get("strategy") == "plain_summary"
+                and event.payload.get("changed") is True
+            ):
+                context.apply_plain_summary(event.payload["summary"])
+            elif (
+                event.event_type is EventType.CONTEXT_COMPACTION_COMPLETED
+                and event.payload.get("strategy") == "drop_oldest"
+                and event.payload.get("changed") is True
+            ):
+                context.drop_oldest(
+                    int(event.payload["target_tokens"]),
+                    trigger=str(event.payload.get("trigger", "threshold")),
+                )
         except RestoreError:
             raise
         except (KeyError, SummaryValidationError, TypeError, ValueError) as error:

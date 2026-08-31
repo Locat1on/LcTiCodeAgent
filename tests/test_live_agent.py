@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from code_agent.events import EventType
+from code_agent.context import CompactionStrategy
 from code_agent.live_agent import LiveAgent
 from code_agent.model import (
     ModelEvent,
@@ -131,6 +132,24 @@ class _FailingProvider:
         yield
 
 
+class _StrategyProvider:
+    def __init__(self, strategy: CompactionStrategy) -> None:
+        self.config = SimpleNamespace(
+            context_budget=4_096,
+            model="google/gemini-3.7-flash",
+            compaction_strategy=strategy,
+        )
+        self.plain_requests: list[list[dict[str, object]]] = []
+
+    def stream(self, messages, tools):
+        yield ModelEvent(ModelEventType.TEXT_DELTA, text="done")
+        yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
+
+    def summarize_context_plain(self, messages):
+        self.plain_requests.append(list(messages))
+        return "Plain summary of the old task."
+
+
 class _ReasoningProvider:
     def __init__(self) -> None:
         self.config = SimpleNamespace(
@@ -185,6 +204,64 @@ def _write_big_file(workspace) -> None:
 
 
 class LiveAgentTests(unittest.TestCase):
+    @staticmethod
+    def _agent_with_large_old_turn(strategy: CompactionStrategy, workspace):
+        provider = _StrategyProvider(strategy)
+        agent = LiveAgent(provider, ToolRegistry(workspace))
+        agent._context.add_user("old task " * 1_200)
+        agent._context.add_assistant("old answer " * 400)
+        agent._context.add_user("current task")
+        return agent, provider
+
+    def test_none_strategy_never_changes_context(self) -> None:
+        with test_directory() as workspace:
+            agent, _ = self._agent_with_large_old_turn(
+                CompactionStrategy.NONE,
+                workspace,
+            )
+            before = agent._context.messages()
+            events = list(agent.compact_context("session-1"))
+
+        self.assertEqual(agent._context.messages(), before)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].payload["strategy"], "none")
+        self.assertFalse(events[0].payload["changed"])
+
+    def test_drop_oldest_strategy_targets_50_percent(self) -> None:
+        with test_directory() as workspace:
+            agent, _ = self._agent_with_large_old_turn(
+                CompactionStrategy.DROP_OLDEST,
+                workspace,
+            )
+            events = list(agent.compact_context("session-1"))
+
+        completed = events[-1]
+        self.assertEqual(completed.payload["strategy"], "drop_oldest")
+        self.assertTrue(completed.payload["changed"])
+        self.assertLessEqual(agent._context.estimated_tokens, 2_048)
+        self.assertEqual(
+            [message["role"] for message in agent._context.messages()],
+            ["system", "user"],
+        )
+
+    def test_plain_summary_strategy_is_marked_unvalidated(self) -> None:
+        with test_directory() as workspace:
+            agent, provider = self._agent_with_large_old_turn(
+                CompactionStrategy.PLAIN_SUMMARY,
+                workspace,
+            )
+            events = list(agent.compact_context("session-1"))
+
+        completed = events[-1]
+        self.assertEqual(completed.payload["strategy"], "plain_summary")
+        self.assertEqual(completed.payload["validation"], "not_checked")
+        self.assertTrue(completed.payload["changed"])
+        self.assertEqual(len(provider.plain_requests), 1)
+        self.assertIn(
+            "plain context summary",
+            agent._context.messages()[1]["content"],
+        )
+
     def test_reasoning_summary_is_visible_and_details_continue_with_tool_result(
         self,
     ) -> None:

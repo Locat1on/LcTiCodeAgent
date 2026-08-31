@@ -106,6 +106,7 @@ class OpenRouterConfigTests(unittest.TestCase):
         self.assertEqual(config.max_steps, 16)
         self.assertEqual(config.max_retries, 2)
         self.assertEqual(config.reasoning_effort, "medium")
+        self.assertEqual(config.compaction_strategy.value, "validated")
         self.assertNotIn("secret", repr(config))
 
     def test_missing_api_key_is_rejected(self) -> None:
@@ -145,8 +146,32 @@ class OpenRouterConfigTests(unittest.TestCase):
                         }
                     )
 
+    def test_compaction_strategy_is_validated(self) -> None:
+        with self.assertRaisesRegex(
+            OpenRouterConfigurationError,
+            "LCTI_COMPACTION_STRATEGY",
+        ):
+            OpenRouterConfig.from_env(
+                {
+                    "OPENROUTER_API_KEY": "secret",
+                    "LCTI_COMPACTION_STRATEGY": "invented",
+                }
+            )
+
 
 class OpenRouterProviderTests(unittest.TestCase):
+    def test_plain_summary_uses_unstructured_non_streaming_response(self) -> None:
+        completions = _SummaryCompletions("Preserve app.py and rerun tests.")
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        provider = OpenRouterProvider(OpenRouterConfig(api_key="secret"), client=client)
+
+        summary = provider.summarize_context_plain(
+            [{"role": "user", "content": "Fix app.py"}]
+        )
+
+        self.assertEqual(summary, "Preserve app.py and rerun tests.")
+        self.assertFalse(completions.request["stream"])
+        self.assertNotIn("response_format", completions.request)
     def test_stream_emits_only_reasoning_summaries_and_preserves_all_details(
         self,
     ) -> None:
