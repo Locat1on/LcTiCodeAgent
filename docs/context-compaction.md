@@ -95,7 +95,7 @@
 
 `python -m experiments.context_compaction` 是确定性机制夹具，用于快速验证压缩率、关键事实、事件 ID 和工具消息配对。
 
-`python -m experiments.context_benchmark` 在四份独立 `buggy_average` 工作区上运行真实多轮 Gemini 任务，统一采集任务成功、测试文件约束、标识符保留、测试证据准确率、最大有效压缩率、prompt/completion token、重复读取、可恢复事件、验证拒绝和耗时。
+`python -m experiments.context_benchmark` 在四份独立 `buggy_average` 工作区上运行真实多轮 Gemini 任务，统一采集任务成功、测试文件约束、标识符保留、测试证据准确率、最大有效压缩率、prompt/completion token、重复读取、可恢复事件、验证拒绝和耗时。每份临时工作区都会先初始化为独立 Git 仓库并提交夹具基线，确保 Agent 看到的 status 和 diff 只属于当前评测工作区，而不是外层项目仓库。
 
 2026-08-31 的单次结果见 `docs/evaluation/context-benchmark-20260831.md`。该结果是功能性预实验，不是多任务、多随机种子的统计结论。
 

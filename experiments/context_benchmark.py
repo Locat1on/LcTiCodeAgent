@@ -62,6 +62,42 @@ def _test_hashes(workspace: Path) -> dict[str, str]:
     }
 
 
+def initialize_git_baseline(workspace: Path) -> None:
+    """Create an isolated repository so Git evidence has a trusted baseline."""
+
+    commands = (
+        ("init", "-q", "-b", "main"),
+        ("add", "--", "."),
+        (
+            "-c",
+            "user.name=LcTiCodeAgent Evaluation",
+            "-c",
+            "user.email=evaluation@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "fixture baseline",
+        ),
+    )
+    for arguments in commands:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=workspace,
+            env=CommandRunner.safe_environment(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            shell=False,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"failed to initialize evaluation Git baseline: {detail}")
+
+
 def _run_turn(agent: LiveAgent, log: SessionLog, prompt: str) -> None:
     turn_id = str(uuid4())
     log.append(
@@ -117,7 +153,12 @@ def run_strategy(
 ) -> tuple[TaskMetrics, dict]:
     workspace = run_root / strategy.value / "workspace"
     workspace.parent.mkdir(parents=True, exist_ok=False)
-    shutil.copytree(source, workspace)
+    shutil.copytree(
+        source,
+        workspace,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    initialize_git_baseline(workspace)
     session_root = run_root / strategy.value / "sessions"
     config = replace(
         base_config,
