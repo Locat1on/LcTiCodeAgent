@@ -139,6 +139,7 @@ def provider_options_from_env(
                 "api_key_env": spec.api_key_env,
                 "default_model": model,
                 "models": list(dict.fromkeys((model, *spec.models))) if model else list(spec.models),
+                "credential_entry_supported": base_url.startswith("https://"),
             }
         )
     return options

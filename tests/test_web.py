@@ -17,7 +17,7 @@ from code_agent.security import (
     RiskClass,
 )
 from code_agent.session import SessionLog
-from code_agent.web import ApprovalBroker, create_web_app
+from code_agent.web import ApprovalBroker, _live_provider_setup, create_web_app
 from tests.helpers import test_directory
 
 
@@ -187,6 +187,113 @@ class ApprovalBrokerTests(unittest.TestCase):
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_live_web_can_start_without_environment_credentials(self) -> None:
+        with test_directory() as directory:
+            factory, options, default_provider, credentials = (
+                _live_provider_setup(directory, env={})
+            )
+
+            self.assertEqual(default_provider, "openrouter")
+            self.assertFalse(any(option["configured"] for option in options))
+            credentials["openrouter"] = "memory-only-secret"
+            agent = factory(
+                "openrouter",
+                lambda request: False,
+                "google/gemini-3.7-flash",
+            )
+
+        self.assertEqual(agent.model, "google/gemini-3.7-flash")
+        self.assertNotIn("memory-only-secret", repr(agent.provider.config))
+
+    def test_web_api_key_is_stored_only_in_process_memory(self) -> None:
+        credentials: dict[str, str] = {}
+        options = [
+            {
+                "id": "google",
+                "label": "Google Gemini",
+                "configured": False,
+                "api_key_env": "GEMINI_API_KEY",
+                "default_model": "gemini-3.7-flash",
+                "models": ["gemini-3.7-flash"],
+                "credential_entry_supported": True,
+            }
+        ]
+        with test_directory() as directory:
+            session_root = directory / "sessions"
+            app = create_web_app(
+                directory,
+                session_root,
+                provider_factory=lambda provider, handler, model: _ApprovalAgent(handler),
+                provider_options=options,
+                default_provider="google",
+                provider_credentials=credentials,
+            )
+            with TestClient(app) as client:
+                configured = client.post(
+                    "/api/providers/google/credential",
+                    json={
+                        "api_key": "web-memory-secret",
+                        "model": "gemini-3.7-flash",
+                    },
+                )
+                catalog = client.get("/api/providers").json()
+                with client.websocket_connect(
+                    "/ws?provider=google&model=gemini-3.7-flash"
+                ) as websocket:
+                    ready = websocket.receive_json()
+
+            session_text = "".join(
+                path.read_text(encoding="utf-8")
+                for path in session_root.glob("*.jsonl")
+            )
+
+        self.assertEqual(configured.status_code, 200)
+        self.assertEqual(configured.json()["stored"], "process_memory")
+        self.assertEqual(credentials, {"google": "web-memory-secret"})
+        self.assertTrue(catalog["providers"][0]["configured"])
+        self.assertEqual(ready["provider"], "google")
+        self.assertNotIn("web-memory-secret", configured.text)
+        self.assertNotIn("web-memory-secret", repr(catalog))
+        self.assertNotIn("web-memory-secret", session_text)
+
+    def test_provider_credential_rejects_non_local_origin(self) -> None:
+        options = [
+            {
+                "id": "google",
+                "label": "Google Gemini",
+                "configured": False,
+                "api_key_env": "GEMINI_API_KEY",
+                "default_model": "gemini-3.7-flash",
+                "models": ["gemini-3.7-flash"],
+                "credential_entry_supported": True,
+            }
+        ]
+        with test_directory() as directory:
+            app = create_web_app(
+                directory,
+                directory / "sessions",
+                provider_factory=lambda provider, handler, model: _ApprovalAgent(handler),
+                provider_options=options,
+                default_provider="google",
+            )
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/providers/google/credential",
+                    headers={"origin": "https://evil.example"},
+                    json={"api_key": "secret", "model": "gemini-3.7-flash"},
+                )
+                invalid_key = client.post(
+                    "/api/providers/google/credential",
+                    json={
+                        "api_key": "line-one\nline-two",
+                        "model": "gemini-3.7-flash",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(invalid_key.status_code, 400)
+        self.assertEqual(app.state.runtime.provider_credentials, {})
+
     def test_web_provider_selection_uses_server_side_configuration(self) -> None:
         calls: list[tuple[str, str | None]] = []
         options = [
@@ -412,7 +519,12 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("LcTiCodeAgent", page.text)
         self.assertIn("工具执行和证据", page.text)
+        self.assertIn('id="providerApiKeyInput"', page.text)
+        self.assertIn('type="password"', page.text)
         self.assertIn("思考摘要", script.text)
+        self.assertIn("等待模型配置", script.text)
+        self.assertNotIn("localStorage", script.text)
+        self.assertNotIn("sessionStorage", script.text)
         self.assertIn("--paper", css.text)
         self.assertIn("new WebSocket", script.text)
         self.assertEqual(mascot.status_code, 200)

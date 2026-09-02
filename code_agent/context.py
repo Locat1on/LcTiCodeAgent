@@ -522,6 +522,19 @@ class ContextManager:
         source_tokens = sum(self._items[index].tokens for index in indices)
         return source_messages, event_ids, len(indices), source_tokens
 
+    def compaction_source_signature(self) -> tuple[tuple[str, int, bool], ...]:
+        """Identify the older context currently eligible for auto compaction."""
+
+        self._refresh_layers()
+        return tuple(
+            (
+                self._items[index].item_id,
+                self._items[index].tokens,
+                self._items[index].pruned,
+            )
+            for index in self._summary_candidate_indices()
+        )
+
     def apply_structured_summary(self, summary: dict[str, Any]) -> tuple[int, int, int]:
         """Atomically replace eligible older turns with one validated summary."""
 

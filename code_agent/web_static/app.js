@@ -14,6 +14,7 @@ const state = {
   providerId: null,
   model: null,
   providers: [],
+  defaultProvider: null,
   suggestion: {
     items: [],
     index: 0,
@@ -71,6 +72,7 @@ const elements = {
   providerForm: document.querySelector("#providerForm"),
   providerSelect: document.querySelector("#providerSelect"),
   providerModelInput: document.querySelector("#providerModelInput"),
+  providerApiKeyInput: document.querySelector("#providerApiKeyInput"),
   providerModels: document.querySelector("#providerModels"),
   providerHint: document.querySelector("#providerHint"),
   applyProvider: document.querySelector("#applyProvider"),
@@ -724,6 +726,7 @@ async function loadProviders() {
     const response = await fetch("/api/providers", { cache: "no-store" });
     const data = await response.json();
     state.providers = data.providers || [];
+    state.defaultProvider = data.default_provider || null;
   } catch (_error) {
     state.providers = [];
   }
@@ -734,14 +737,14 @@ function openProviderDialog() {
   for (const provider of state.providers) {
     const option = document.createElement("option");
     option.value = provider.id;
-    option.disabled = !provider.configured;
     option.textContent = provider.configured
       ? provider.label
-      : `${provider.label}（未配置）`;
+      : `${provider.label}（需要密钥）`;
     elements.providerSelect.append(option);
   }
   const current = state.providers.find((item) => item.id === state.providerId);
-  const fallback = current || state.providers.find((item) => item.configured);
+  const preferred = state.providers.find((item) => item.id === state.defaultProvider);
+  const fallback = current || preferred || state.providers[0];
   if (!fallback) {
     showNotice("服务端没有可用的模型厂商配置", "error");
     return;
@@ -763,11 +766,47 @@ function updateProviderFields(provider) {
     elements.providerModels.append(option);
   }
   elements.providerModelInput.value = provider.default_model || "";
-  elements.providerModelInput.disabled = !provider.configured;
-  elements.applyProvider.disabled = !provider.configured;
-  elements.providerHint.textContent = provider.configured
-    ? `已由服务端 ${provider.api_key_env || "配置"} 提供凭据；切换会创建新会话。`
-    : `请在启动 Web 服务前设置 ${provider.api_key_env}。`;
+  elements.providerModelInput.disabled = provider.id === "simulation";
+  elements.providerApiKeyInput.value = "";
+  elements.providerApiKeyInput.disabled = !provider.api_key_env || !provider.credential_entry_supported;
+  elements.providerApiKeyInput.placeholder = provider.configured
+    ? "留空沿用已有服务端密钥"
+    : "输入密钥，仅保存到本次服务内存";
+  if (!provider.api_key_env) {
+    elements.providerHint.textContent = "离线模拟模式不需要 API Key。";
+  } else if (!provider.credential_entry_supported) {
+    elements.providerHint.textContent = `请先通过环境变量配置该接口的 HTTPS Base URL，再输入 ${provider.api_key_env}。`;
+  } else if (provider.configured) {
+    elements.providerHint.textContent = `已配置 ${provider.api_key_env}。留空可继续使用，输入新值会替换本次服务内存中的密钥。`;
+  } else {
+    elements.providerHint.textContent = `输入 ${provider.api_key_env}。密钥不写入浏览器存储、Cookie 或 Session 日志。`;
+  }
+  updateProviderSubmitState();
+}
+
+function updateProviderSubmitState() {
+  const provider = state.providers.find((item) => item.id === elements.providerSelect.value);
+  if (!provider) {
+    elements.applyProvider.disabled = true;
+    return;
+  }
+  const hasModel = Boolean(elements.providerModelInput.value.trim());
+  const hasCredential = provider.configured || Boolean(elements.providerApiKeyInput.value.trim());
+  elements.applyProvider.disabled = !hasModel || !hasCredential;
+}
+
+async function storeProviderCredential(providerId, apiKey, model) {
+  const response = await fetch(
+    `/api/providers/${encodeURIComponent(providerId)}/credential`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey, model }),
+    },
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "API Key 配置失败");
+  return data;
 }
 
 function renderSessions(sessions) {
@@ -1199,18 +1238,36 @@ for (const button of [elements.providerSettingsButton, elements.providerSettings
     openProviderDialog();
   });
 }
-document.querySelector("#providerDialogClose").addEventListener("click", () => elements.providerDialog.close());
-document.querySelector("#cancelProviderEdit").addEventListener("click", () => elements.providerDialog.close());
+function closeProviderDialog() {
+  elements.providerApiKeyInput.value = "";
+  elements.providerDialog.close();
+}
+
+document.querySelector("#providerDialogClose").addEventListener("click", closeProviderDialog);
+document.querySelector("#cancelProviderEdit").addEventListener("click", closeProviderDialog);
 elements.providerSelect.addEventListener("change", () => {
   updateProviderFields(
     state.providers.find((provider) => provider.id === elements.providerSelect.value),
   );
 });
-elements.providerForm.addEventListener("submit", (event) => {
+elements.providerModelInput.addEventListener("input", updateProviderSubmitState);
+elements.providerApiKeyInput.addEventListener("input", updateProviderSubmitState);
+elements.providerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const provider = state.providers.find((item) => item.id === elements.providerSelect.value);
   const model = elements.providerModelInput.value.trim();
-  if (!provider?.configured || !model) return;
+  const apiKey = elements.providerApiKeyInput.value.trim();
+  if (!provider || !model || (!provider.configured && !apiKey)) return;
+  if (apiKey) {
+    try {
+      await storeProviderCredential(provider.id, apiKey, model);
+      provider.configured = true;
+      elements.providerApiKeyInput.value = "";
+    } catch (error) {
+      elements.providerHint.textContent = error.message || "API Key 配置失败";
+      return;
+    }
+  }
   const params = new URLSearchParams({ provider: provider.id, model });
   location.href = `/?${params.toString()}`;
 });
@@ -1218,4 +1275,16 @@ document.querySelectorAll(".inspector-tabs [role=tab]").forEach((tab) => {
   tab.addEventListener("click", () => selectTab(tab.dataset.tab));
 });
 
-connect();
+async function initialize() {
+  await loadProviders();
+  if (state.providers.some((provider) => provider.configured)) {
+    connect();
+    return;
+  }
+  state.providerId = state.defaultProvider;
+  setConnection("等待模型配置", false);
+  setRunning(false, "请先配置模型", "idle");
+  openProviderDialog();
+}
+
+initialize();

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -37,6 +38,7 @@ from .simulator import SimulatedAgent
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9-]+")
 MAX_HISTORY_EVENTS = 500
 MAX_USER_TEXT = 20_000
+MAX_API_KEY_LENGTH = 4_096
 APPROVAL_TIMEOUT_SECONDS = 300.0
 
 
@@ -366,12 +368,14 @@ class WebRuntime:
         provider_factory: ProviderAgentFactory,
         provider_options: list[dict[str, Any]],
         default_provider: str,
+        provider_credentials: dict[str, str] | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.session_root = session_root.resolve()
         self.provider_factory = provider_factory
         self.provider_options = provider_options
         self.default_provider = default_provider
+        self.provider_credentials = provider_credentials if provider_credentials is not None else {}
         self._active_lock = threading.Lock()
         self._active_sessions: dict[str, int] = {}
 
@@ -415,6 +419,42 @@ class WebRuntime:
             session_id=session_id,
             provider_id=selected_provider,
         )
+
+    def set_provider_credential(
+        self,
+        provider_id: str,
+        api_key: str,
+        model: str,
+    ) -> dict[str, Any]:
+        option = next(
+            (item for item in self.provider_options if item["id"] == provider_id),
+            None,
+        )
+        if option is None or not option.get("api_key_env"):
+            raise ValueError("model provider does not accept an API key")
+        if not option.get("credential_entry_supported", True):
+            raise ValueError("provider base URL must be configured through the environment")
+        normalized_key = api_key.strip()
+        if (
+            not normalized_key
+            or len(normalized_key) > MAX_API_KEY_LENGTH
+            or any(character in normalized_key for character in "\r\n\0")
+        ):
+            raise ValueError("API key must contain between 1 and 4096 safe characters")
+        normalized_model = model.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", normalized_model):
+            raise ValueError("model name is invalid")
+        self.provider_credentials[provider_id] = normalized_key
+        option["configured"] = True
+        option["default_model"] = normalized_model
+        option["models"] = list(
+            dict.fromkeys((normalized_model, *option.get("models", [])))
+        )
+        return {
+            "id": provider_id,
+            "configured": True,
+            "stored": "process_memory",
+        }
 
     def list_sessions(self) -> list[dict[str, Any]]:
         if not self.session_root.exists():
@@ -515,6 +555,7 @@ def create_web_app(
     provider_factory: ProviderAgentFactory | None = None,
     provider_options: list[dict[str, Any]] | None = None,
     default_provider: str | None = None,
+    provider_credentials: dict[str, str] | None = None,
 ) -> Starlette:
     static_root = Path(__file__).with_name("web_static")
     if provider_factory is None:
@@ -535,6 +576,7 @@ def create_web_app(
             "api_key_env": None,
             "default_model": "simulated-local",
             "models": ["simulated-local"],
+            "credential_entry_supported": False,
         }
     ]
     selected_default = default_provider or configured_options[0]["id"]
@@ -544,6 +586,7 @@ def create_web_app(
         provider_factory,
         configured_options,
         selected_default,
+        provider_credentials,
     )
 
     async def index(request: Request) -> FileResponse:
@@ -559,6 +602,38 @@ def create_web_app(
                 "default_provider": runtime.default_provider,
             }
         )
+
+    async def provider_credential(request: Request) -> JSONResponse:
+        if not _is_local_origin(request.headers.get("origin")):
+            return JSONResponse(
+                {"error": "non-local origin is not allowed"},
+                status_code=403,
+            )
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > 8_192:
+            return JSONResponse({"error": "request body is too large"}, status_code=413)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            api_key = payload.get("api_key")
+            model = payload.get("model")
+            if not isinstance(api_key, str) or not isinstance(model, str):
+                raise ValueError("api_key and model are required")
+            return JSONResponse(
+                runtime.set_provider_credential(
+                    request.path_params["provider_id"],
+                    api_key,
+                    model,
+                )
+            )
+        except json.JSONDecodeError:
+            return JSONResponse(
+                {"error": "request body must be valid JSON"},
+                status_code=400,
+            )
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
 
     async def session_operation(request: Request) -> JSONResponse:
         if not _is_local_origin(request.headers.get("origin")):
@@ -710,6 +785,11 @@ def create_web_app(
         Route("/api/sessions", sessions),
         Route("/api/providers", providers),
         Route(
+            "/api/providers/{provider_id}/credential",
+            provider_credential,
+            methods=["POST"],
+        ),
+        Route(
             "/api/sessions/{session_id}",
             session_operation,
             methods=["PATCH", "DELETE"],
@@ -761,24 +841,30 @@ def _branch_name(workspace: Path) -> str:
 
 def _live_provider_setup(
     workspace: Path,
-) -> tuple[ProviderAgentFactory, list[dict[str, Any]], str]:
+    env: dict[str, str] | None = None,
+) -> tuple[
+    ProviderAgentFactory,
+    list[dict[str, Any]],
+    str,
+    dict[str, str],
+]:
     from .command import CommandRunner
     from .live_agent import LiveAgent
     from .openrouter import (
         OpenRouterConfig,
         OpenRouterProvider,
+        PROVIDER_SPECS,
         provider_options_from_env,
     )
     from .tools import ToolRegistry
 
-    options = provider_options_from_env()
+    values = dict(os.environ if env is None else env)
+    credentials: dict[str, str] = {}
+    options = provider_options_from_env(values)
     configured = [option for option in options if option["configured"]]
-    if not configured:
-        required = ", ".join(str(option["api_key_env"]) for option in options)
-        raise ValueError(f"no model provider is configured; set one of: {required}")
     default_provider = next(
         (option["id"] for option in configured if option["id"] == "openrouter"),
-        configured[0]["id"],
+        configured[0]["id"] if configured else "openrouter",
     )
 
     def build(
@@ -786,7 +872,15 @@ def _live_provider_setup(
         approval_handler: ApprovalHandler,
         model: str | None,
     ) -> WebAgent:
-        config = OpenRouterConfig.for_provider(provider_id, model=model)
+        prepared = dict(values)
+        if provider_id in credentials:
+            spec = PROVIDER_SPECS[provider_id]
+            prepared[spec.api_key_env] = credentials[provider_id]
+        config = OpenRouterConfig.for_provider(
+            provider_id,
+            model=model,
+            env=prepared,
+        )
         command_runner = CommandRunner()
         return LiveAgent(
             OpenRouterProvider(config),
@@ -794,7 +888,7 @@ def _live_provider_setup(
             approval_handler=approval_handler,
         )
 
-    return build, options, default_provider
+    return build, options, default_provider, credentials
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -824,13 +918,14 @@ def main(argv: list[str] | None = None) -> int:
     if provider_setup is None:
         app = create_web_app(args.workspace, args.session_root)
     else:
-        provider_factory, options, default_provider = provider_setup
+        provider_factory, options, default_provider, credentials = provider_setup
         app = create_web_app(
             args.workspace,
             args.session_root,
             provider_factory=provider_factory,
             provider_options=options,
             default_provider=default_provider,
+            provider_credentials=credentials,
         )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0

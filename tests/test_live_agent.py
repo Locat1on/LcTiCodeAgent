@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -88,6 +89,32 @@ class _CompactionProvider:
         yield ModelEvent(ModelEventType.TEXT_DELTA, text="Done.")
         if call_number == 2:
             yield ModelEvent(ModelEventType.USAGE, usage=ModelUsage(200, 20, 220))
+        yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
+
+
+class _RepeatedToolProvider:
+    def __init__(self, budget: int) -> None:
+        self.config = SimpleNamespace(
+            context_budget=budget,
+            model="google/gemini-3.7-flash",
+        )
+        self.calls = 0
+
+    def stream(self, messages, tools):
+        self.calls += 1
+        if self.calls <= 3:
+            yield ModelEvent(
+                ModelEventType.TOOL_CALL,
+                tool_call=ModelToolCall(
+                    call_id=f"call-{self.calls}",
+                    name="list_files",
+                    arguments={"path": ".", "depth": 1},
+                    raw_arguments='{"path":".","depth":1}',
+                ),
+            )
+            yield ModelEvent(ModelEventType.COMPLETED, finish_reason="tool_calls")
+            return
+        yield ModelEvent(ModelEventType.TEXT_DELTA, text="Done.")
         yield ModelEvent(ModelEventType.COMPLETED, finish_reason="stop")
 
 
@@ -408,6 +435,55 @@ class LiveAgentTests(unittest.TestCase):
         }
         self.assertEqual(assistant_call_ids, set(tool_messages))
         self.assertEqual(agent.used_tokens, 220)
+
+    def test_threshold_compaction_does_not_repeat_for_same_eligible_history(self) -> None:
+        with test_directory() as workspace:
+            provider = _RepeatedToolProvider(budget=4_096)
+            agent = LiveAgent(provider, ToolRegistry(workspace))
+            call = {
+                "id": "old-call",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"old.py"}',
+                },
+            }
+            agent._context.add_user("Inspect the old file")
+            agent._context.add_assistant("", [call])
+            agent._context.add_tool(
+                call_id="old-call",
+                tool_name="read_file",
+                arguments={"path": "old.py"},
+                content=json.dumps(
+                    {
+                        "ok": True,
+                        "result": "sha256=" + "a" * 64 + "\n" + "old evidence " * 500,
+                    }
+                ),
+                source_event_id="old-event",
+            )
+
+            events = list(agent.respond("x" * 9_000, "session-1", "turn-1"))
+
+        compaction_events = [
+            event
+            for event in events
+            if event.event_type
+            in {
+                EventType.CONTEXT_COMPACTION_STARTED,
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+            }
+        ]
+        self.assertEqual(
+            [event.event_type for event in compaction_events],
+            [
+                EventType.CONTEXT_COMPACTION_STARTED,
+                EventType.CONTEXT_COMPACTION_COMPLETED,
+            ],
+        )
+        completed = compaction_events[-1]
+        self.assertTrue(completed.payload["changed"])
+        self.assertGreater(completed.payload["after_tokens"], 2_457)
 
     def test_manual_compact_context_reports_without_threshold(self) -> None:
         with test_directory() as workspace:

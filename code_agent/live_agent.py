@@ -113,6 +113,9 @@ class LiveAgent:
         self._compaction_threshold = int(self.context_limit * COMPACTION_TRIGGER_RATIO)
         self._summary_threshold = int(self.context_limit * SUMMARY_TRIGGER_RATIO)
         self._summary_target = int(self.context_limit * SUMMARY_TARGET_RATIO)
+        self._last_auto_compaction_signature: tuple[
+            tuple[str, int, bool], ...
+        ] | None = None
 
     def respond(
         self,
@@ -299,11 +302,13 @@ class LiveAgent:
     def clear_context(self) -> None:
         self._context.clear()
         self.used_tokens = 0
+        self._last_auto_compaction_signature = None
 
     def restore(self, events: list[AgentEvent]) -> RestoreReport:
         projection = project_session(events, SYSTEM_PROMPT)
         self._context = projection.context
         self.used_tokens = projection.used_tokens
+        self._last_auto_compaction_signature = None
         return RestoreReport(
             events_replayed=len(events),
             context_items=self._context.item_count,
@@ -364,25 +369,38 @@ class LiveAgent:
         before = self._context.estimated_tokens
         if self.compaction_strategy is CompactionStrategy.NONE:
             return
+        threshold = (
+            self._summary_threshold
+            if self.compaction_strategy
+            in {CompactionStrategy.DROP_OLDEST, CompactionStrategy.PLAIN_SUMMARY}
+            else self._compaction_threshold
+        )
+        if before <= threshold:
+            return
+        source_signature = self._context.compaction_source_signature()
+        if source_signature == self._last_auto_compaction_signature:
+            return
         if self.compaction_strategy is CompactionStrategy.DROP_OLDEST:
-            if before > self._summary_threshold:
-                yield from self._emit_drop_oldest(
-                    session_id,
-                    turn_id,
-                    step_id,
-                    trigger="threshold",
-                )
+            yield from self._emit_drop_oldest(
+                session_id,
+                turn_id,
+                step_id,
+                trigger="threshold",
+            )
+            self._last_auto_compaction_signature = (
+                self._context.compaction_source_signature()
+            )
             return
         if self.compaction_strategy is CompactionStrategy.PLAIN_SUMMARY:
-            if before > self._summary_threshold:
-                yield from self._emit_plain_summary(
-                    session_id,
-                    turn_id,
-                    step_id,
-                    trigger="threshold",
-                )
-            return
-        if before <= self._compaction_threshold:
+            yield from self._emit_plain_summary(
+                session_id,
+                turn_id,
+                step_id,
+                trigger="threshold",
+            )
+            self._last_auto_compaction_signature = (
+                self._context.compaction_source_signature()
+            )
             return
         yield from self._emit_compaction(
             session_id,
@@ -400,6 +418,9 @@ class LiveAgent:
                 step_id,
                 trigger="threshold",
             )
+        self._last_auto_compaction_signature = (
+            self._context.compaction_source_signature()
+        )
 
     def _emit_compaction(
         self,

@@ -31,7 +31,11 @@ $env:OPENROUTER_API_KEY = "..."
 
 ### 模型厂商选择
 
-顶部模型区域打开厂商与模型面板。Web UI 支持 OpenRouter、Google Gemini、DeepSeek、OpenAI 和自定义 OpenAI-compatible 接口，只允许选择服务端环境中已经配置密钥的厂商。API Key 不会通过 `/api/providers` 返回，不写入浏览器存储或 Session 日志；接口只返回厂商名称、可用状态、模型候选和所需环境变量名称。
+顶部模型区域打开厂商、模型和 API Key 面板。Web UI 支持 OpenRouter、Google Gemini、DeepSeek、OpenAI 和自定义 OpenAI-compatible 接口。密钥既可来自服务端环境变量，也可通过密码输入框发送到 localhost；后者只保存于当前后端进程内存，服务重启后消失。
+
+`POST /api/providers/{provider_id}/credential` 只接受本机 Origin、JSON 请求、合法模型名和不超过 4096 字符的密钥。响应只返回厂商 ID、配置状态和 `stored=process_memory`，不回显密钥。前端提交后立即清空输入，不使用 Local Storage、Session Storage 或 Cookie。`/api/providers` 仍只返回厂商名称、可用状态、模型候选和环境变量名称。
+
+环境变量仍是录屏、自动化和更高安全要求场景的推荐方式，因为这种方式不需要让密钥经过浏览器和本机 HTTP 请求。
 
 切换厂商或模型会创建新会话。`session.started` 记录非敏感的厂商 ID 与模型名，恢复会话时自动重建原 Provider，避免跨厂商混用 reasoning detail 或 tool-call 状态。
 
@@ -92,7 +96,7 @@ Session restore 使用 `model_text` 重建上下文。WebSocket 回传用户事�
 - 响应设置 `nosniff`、`no-referrer` 和 `no-store`；
 - 动态事件内容全部通过 `textContent` 渲染，不插入事件提供的 HTML；
 - 思考区只接收经过分类的 `assistant.reasoning_delta`；WebSocket 会移除原始 `reasoning`、签名、加密块和完整 `reasoning_details`；
-- API key 只由后端环境变量读取，不进入 ready 消息、浏览器状态或会话日志。
+- API Key 来自环境变量或 Web 进程内存，不进入 ready 消息、浏览器持久化状态或会话日志；Web 输入方式会在提交瞬间经过浏览器内存与 localhost 请求。
 
 浏览器会看到完成任务所需的代码片段、命令输出和 Git Preflight。这是本机产品界面，不应暴露到不可信网络。
 

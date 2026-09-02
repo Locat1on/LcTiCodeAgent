@@ -57,7 +57,7 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 .\.venv\Scripts\python.exe -m code_agent.web --live
 ```
 
-Web UI 的模型区域可切换服务端已配置的 API 厂商与模型，切换时创建新会话。密钥不会进入浏览器存储或 Session JSONL。除默认 OpenRouter 外，可在启动前设置：
+Web UI 的模型区域可切换 API 厂商与模型，切换时创建新会话。密钥可以由环境变量提供，也可以在 Web 弹窗中输入。Web 输入的密钥只保存到当前后端进程内存，服务重启后消失，不写入浏览器存储、Cookie 或 Session JSONL。除默认 OpenRouter 外，可在启动前设置：
 
 ```powershell
 $env:GEMINI_API_KEY = "..."       # Google Gemini direct
@@ -120,4 +120,4 @@ Workspace Policy Sandbox无需Docker、WSL或管理员权限。它限制所有�
 
 2026-08-31 的单次真实结果中，四种策略均完成修复并通过测试；`validated` 的最大单次压缩比为 `0.2315`，但因一次摘要被事实校验拒绝，其总 prompt token 并未优于基线。详见 [评测报告](docs/evaluation/context-benchmark-20260831.md)。
 
-API key 仅通过环境变量读取，不会写入仓库、浏览器存储、Session 日志或视频。OpenRouter 请求额外限制为 `data_collection=deny`；直连其他厂商时，数据策略由对应厂商账户与服务条款决定。
+API Key 推荐通过环境变量提供，也可以从本地 Web 配置页输入并仅保存于后端进程内存。两种方式都不会写入仓库、浏览器持久化存储或 Session 日志；录制视频时仍应使用环境变量并隐藏配置终端。OpenRouter 请求额外限制为 `data_collection=deny`；直连其他厂商时，数据策略由对应厂商账户与服务条款决定。

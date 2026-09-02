@@ -9,7 +9,7 @@
 - 失败重试：默认 2 次，可用 `LCTI_OPENROUTER_RETRIES` 配置为 0–5
 - 推理强度：默认 `medium`，可用 `LCTI_REASONING_EFFORT` 配置为 `minimal / low / medium / high`
 
-Web UI 还支持 Google Gemini、DeepSeek、OpenAI 和由环境变量指定的自定义兼容接口。Google 使用 `https://generativelanguage.googleapis.com/v1beta/openai/`，DeepSeek 使用 `https://api.deepseek.com`，OpenAI 使用 `https://api.openai.com/v1`。API Key 始终由服务端环境变量读取，浏览器只选择已配置的厂商与模型。直连其他厂商时不发送 OpenRouter 专属的路由与数据策略字段。
+Web UI 还支持 Google Gemini、DeepSeek、OpenAI 和由环境变量指定的自定义兼容接口。Google 使用 `https://generativelanguage.googleapis.com/v1beta/openai/`，DeepSeek 使用 `https://api.deepseek.com`，OpenAI 使用 `https://api.openai.com/v1`。API Key 可以由环境变量读取，也可以经本机 Web 页面输入后仅保存在后端进程内存；Provider 请求创建时使用内存覆盖值，但不修改 `os.environ`。直连其他厂商时不发送 OpenRouter 专属的路由与数据策略字段。
 
 上下文对比实验仍固定使用 OpenRouter 模型 slug，以保证实验可复现。
 
